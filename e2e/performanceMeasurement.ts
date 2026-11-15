@@ -46,6 +46,7 @@ export type DomNodeCounts = {
 export type FirstBubbleBoundary = {
   ms: number,
   startedAtMs: number,
+  rpcStartedAtMs?: number,
   domNodes: number,
   domClassCounts: Record<string, number>,
   domNodeCounts: DomNodeCounts,
@@ -115,31 +116,106 @@ export async function beginMeasurement(page: Page, requests: {value: number}, re
   }, {recordSpans: recordRpcSpans, traceEnabled, captureWorkerMessages});
 }
 
-export async function startMeasurementAtClick(target: Locator) {
-  await target.evaluate((element) => {
+export async function waitForPartnerDialogHistoryPrefetch(page: Page, peerId: number, includeQueued = true) {
+  await page.waitForFunction(({peerId, includeQueued}) => {
+    const queue = (window as any).appDialogsManager?.lazyLoadQueue;
+    if(!Array.isArray(queue?.queue) || !(queue?.inProcess instanceof Set)) {
+      throw new Error('chat-list history lazy-load queue is unavailable');
+    }
+    const rows = [...document.querySelectorAll<HTMLElement>(`#chatlist-container .chatlist-chat[data-peer-id="${peerId}"]`)];
+    if(!rows.length) throw new Error(`fixture peer ${peerId} has no chat-list row before the cold history flush`);
+    // An in-flight item can outlive its row when dialog reconciliation replaces the DOM node.
+    return ![...(includeQueued ? queue.queue : []), ...queue.inProcess].some((item) => item.div?.dataset.peerId === String(peerId));
+  }, {peerId, includeQueued}, {timeout: 60_000, polling: 20});
+}
+
+export async function waitForDialogHistoryPrefetches(page: Page) {
+  await page.waitForFunction(() => {
+    const queue = (window as any).appDialogsManager?.lazyLoadQueue;
+    if(!queue?.lockPromise || !(queue.inProcess instanceof Set)) {
+      throw new Error('chat-list history lazy-load queue must be locked while draining prefetches');
+    }
+    return queue.inProcess.size === 0;
+  }, undefined, {timeout: 60_000, polling: 20});
+}
+
+export async function withLockedDialogHistoryPrefetch<T>(page: Page, action: () => Promise<T>): Promise<T> {
+  await page.evaluate(() => {
+    const queue = (window as any).appDialogsManager?.lazyLoadQueue;
+    if(typeof queue?.lock !== 'function' || typeof queue?.unlockAndRefresh !== 'function') {
+      throw new Error('chat-list history lazy-load queue cannot be locked');
+    }
+    queue.lock();
+    if(!queue.lockPromise) throw new Error('chat-list history prefetch could not be locked');
+  });
+  let actionFailed = false;
+  let actionError: unknown;
+  try {
+    return await action();
+  } catch(error) {
+    actionFailed = true;
+    actionError = error;
+    throw error;
+  } finally {
+    try {
+      await page.evaluate(() => {
+        const queue = (window as any).appDialogsManager.lazyLoadQueue;
+        if(queue.lockPromise) queue.unlockAndRefresh();
+      });
+    } catch(error) {
+      if(actionFailed) throw Object.assign(new Error('chat-open and prefetch cleanup failed'), {errors: [actionError, error]});
+      throw error;
+    }
+  }
+}
+
+export async function startMeasurementAtClick(target: Locator, captureMouseDown = false, releasePrefetchAtMouseDown = false) {
+  await target.evaluate((element, {captureMouseDown, releasePrefetchAtMouseDown}) => {
+    const queue = (window as any).appDialogsManager?.lazyLoadQueue;
+    if(releasePrefetchAtMouseDown && (!captureMouseDown || !queue?.lockPromise || typeof queue.unlockAndRefresh !== 'function')) {
+      throw new Error('chat-list history prefetch must be locked before arming its mousedown release');
+    }
     const perf = (window as any).__teagramPerf as {
       started: number,
       preInteractionMs?: number,
       clickAt?: number,
+      rpcStartedAtMs?: number,
+      prefetchReleasedAtMouseDown?: boolean,
       peerId?: string,
       firstBubbleBoundary?: FirstBubbleBoundary
     };
     const armedAt = performance.now();
     perf.peerId = (element as HTMLElement).dataset.peerId;
-    const onClick = (event: MouseEvent) => {
+    perf.rpcStartedAtMs = undefined;
+    perf.prefetchReleasedAtMouseDown = false;
+    const matchesTarget = (event: MouseEvent) => {
       const peerRow = event.composedPath().find((target) =>
         target instanceof HTMLElement && target.classList.contains('chatlist-chat')
       ) as HTMLElement | undefined;
-      if(perf.peerId ? peerRow?.dataset.peerId !== perf.peerId : !event.composedPath().includes(element)) return;
+      return perf.peerId ? peerRow?.dataset.peerId === perf.peerId : event.composedPath().includes(element);
+    };
+    const onMouseDown = (event: MouseEvent) => {
+      if(event.button !== 0 || !matchesTarget(event)) return;
+      perf.rpcStartedAtMs = performance.now();
+      document.removeEventListener('mousedown', onMouseDown, true);
+      if(releasePrefetchAtMouseDown && (window as any).appDialogsManager?.lazyLoadQueue === queue && queue.lockPromise) {
+        queue.unlockAndRefresh();
+        perf.prefetchReleasedAtMouseDown = true;
+      }
+    };
+    const onClick = (event: MouseEvent) => {
+      if(!matchesTarget(event)) return;
       document.removeEventListener('click', onClick, true);
+      if(captureMouseDown) document.removeEventListener('mousedown', onMouseDown, true);
       const clickAt = performance.now();
       perf.started = clickAt;
       perf.preInteractionMs = clickAt - armedAt;
       perf.clickAt = clickAt;
       perf.firstBubbleBoundary = undefined;
     };
+    if(captureMouseDown) document.addEventListener('mousedown', onMouseDown, true);
     document.addEventListener('click', onClick, true);
-  });
+  }, {captureMouseDown, releasePrefetchAtMouseDown});
 }
 
 export async function waitForFirstVisibleBubble(page: Page) {
@@ -165,6 +241,7 @@ export async function waitForFirstVisibleBubble(page: Page) {
       perf.firstBubbleBoundary = {
         ms,
         startedAtMs: perf.clickAt,
+        rpcStartedAtMs: perf.rpcStartedAtMs,
         domNodes: elements.length,
         domClassCounts,
         domNodeCounts: {

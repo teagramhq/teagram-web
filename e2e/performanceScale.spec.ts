@@ -1,13 +1,13 @@
 import {installWorkerMessageAttribution, summarizeWorkerMessageAttribution} from './workerMessageAttribution';
-import {readFileSync} from 'node:fs';
+import {readFileSync, writeFileSync} from 'node:fs';
 import {writePerformanceReport} from './performanceReport';
-import {getServerRpcTracePosition, matchServerRpcRecordToClientCall, readServerRpcTraceRecordsSince, serverRpcClientCallsAreSettled, serverRpcClientCallsByIdentity, serverRpcRecordMatchesClientCall, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls} from '../scripts/performance/server-rpc-trace.mjs';
+import {getServerRpcTracePosition, matchServerRpcRecordToClientCall, readServerRpcTraceRecordsSince, requireFixtureHistoryCall, requireNoUncorrelatedHistoryRecords, serverRpcClientCallsAreSettled, serverRpcClientCallsByIdentity, serverRpcRecordMatchesClientCall, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls} from '../scripts/performance/server-rpc-trace.mjs';
 import {expect, test, type Browser, type BrowserContext, type Locator, type Page, type Request} from '@playwright/test';
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, isNetworkRequestURL, sumBundleBytes, trackBundleDocumentNavigation, type BundleRequestTracker} from './performanceBundleBytes';
-import {buildWalkComparison, CACHED_DIALOG_RECONCILE_PHASE_NAME, cachedDialogReconcileWindowMs, collectCachedDialogReconcileSummaries, findLongTasksOverlappingWalkMirrors, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
-import {beginMeasurement as begin, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList, type DomNodeCounts, type FirstVisibleChatListBoundary} from './performanceMeasurement';
+import {buildWalkComparison, CACHED_DIALOG_RECONCILE_PHASE_NAME, cachedDialogReconcileWindowMs, collectCachedDialogReconcileSummaries, findLongTasksOverlappingWalkMirrors, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsBetween, rpcInvocationsInMeasurementWindow, rpcMethodCounts, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
+import {beginMeasurement as begin, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList, waitForDialogHistoryPrefetches, waitForPartnerDialogHistoryPrefetch, withLockedDialogHistoryPrefetch, type DomNodeCounts, type FirstVisibleChatListBoundary} from './performanceMeasurement';
 import {endPresentedFrameCapture, startFrameTrace, startPresentedFrameCapture, stopFrameTrace, summarizeDroppedFrames, summarizeFrameScripts, withPresentedFrameCleanup} from './performanceFrameTrace';
 import {LOTTIE_FRAME_BG_CSS, scheduleAfterInterveningPaint, waitForFirstStickerFrame, waitForFirstStickerPaint, waitUntilOnScreen} from './lottieFrameMeasurement';
 import {globalSearchSampleMs, isCurrentGlobalSearchResult} from '../scripts/performance/global-search-measurement.mjs';
@@ -15,6 +15,7 @@ import {globalSearchSampleMs, isCurrentGlobalSearchResult} from '../scripts/perf
 type Fixture = {
   owner: number,
   partner: number,
+  contacts: number[],
   middle_date: number
 };
 
@@ -30,6 +31,7 @@ type ServerRpcTraceRecord = {
 type ServerRpcClientCall = {
   callId: number,
   method: string,
+  historyPeer?: string,
   startedAtEpochMs: number,
   durationMs: number | null,
   outcome: 'pending' | 'success' | 'error'
@@ -63,6 +65,7 @@ type Metric = {
   firstVisibleChatListMs?: number,
   firstVisibleChatListSource?: FirstVisibleChatListBoundary['source'],
   liveBoundaryMs?: number,
+  prefetchReleasedAtMouseDown?: boolean,
   longTasksOver50Ms: number,
   blockingTimeMs: number,
   maxLongTaskDurationMs: number,
@@ -73,6 +76,9 @@ type Metric = {
   serverRpcRecords?: ServerRpcTraceRecord[],
   serverRpcClientCalls?: ServerRpcClientCall[],
   serverRpcGateWindow?: ServerRpcGateWindow,
+  serverRpcInteractionWindow?: ServerRpcGateWindow,
+  serverRpcFixturePeer?: string,
+  serverRpcCompleteTrace?: unknown,
   rpcTraceEnabled: boolean,
   rpcSpansRecorded: boolean,
   rpcCalls: PerformanceRpcCall[],
@@ -130,6 +136,7 @@ type VariantRun = {
 type MeasurementBoundary = {
   ms: number,
   startedAtMs: number,
+  rpcStartedAtMs?: number,
   domNodes: number,
   domClassCounts: Metric['domClassCounts'],
   domNodeCounts: Metric['domNodeCounts'],
@@ -222,17 +229,7 @@ async function attachServerRpcTrace(sample: Metric, offset: number | undefined) 
   if(!Array.isArray(clientCalls)) throw new Error('100x chat-open sample has no client messages.getHistory span list');
   const traceRecords = readServerRpcTraceRecordsSince(serverRpcTraceFile!, offset).filter((record) => record.method === 'messages.getHistory');
   if(!clientCalls.length) {
-    const gateWindow = sample.serverRpcGateWindow;
-    if(!gateWindow || !Number.isFinite(gateWindow.startEpochMs) || !Number.isFinite(gateWindow.endEpochMs) || gateWindow.endEpochMs <= gateWindow.startEpochMs) {
-      throw new Error('100x chat-open sample has no valid gate window for zero-call server trace validation');
-    }
-    const inGateRecords = traceRecords.filter((record) => (
-      record.end_unix_ms >= gateWindow.startEpochMs &&
-      record.end_unix_ms - record.duration_us / 1000 <= gateWindow.endEpochMs
-    ));
-    if(inGateRecords.length) {
-      throw new Error(`100x chat-open zero-call gate has ${inGateRecords.length} uncorrelated server messages.getHistory records inside its gate window`);
-    }
+    requireNoUncorrelatedHistoryRecords(traceRecords, sample.serverRpcInteractionWindow);
     return {...sample, serverRpcRecords: []};
   }
   const records = traceRecords.filter((record) => serverRpcRecordMatchesClientCalls(record, clientCalls));
@@ -489,6 +486,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       invocations: Array<{method: string, startedAtEpochMs: number}>,
       calls: Array<{
         method: string,
+        historyPeer?: string,
         startedAtEpochMs: number,
         durationMs: number | null,
         outcome: 'pending' | 'success' | 'error'
@@ -526,6 +524,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       rpcCallCount: rpcTrace.callCount,
       rpcInvocations: rpcTrace.invocations,
       rpcRawCalls: rpcTrace.calls,
+      prefetchReleasedAtMouseDown: perf.prefetchReleasedAtMouseDown,
       workerPhases,
       mainPhases,
       droppedFramePercent: scroll && intervals.length ? droppedFramePercent : undefined,
@@ -539,7 +538,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
   if(captureServerRpcClientCalls) expect(captureRpcTrace && metrics.rpcSpansRecorded, 'server RPC correlation requires recorded client spans').toBe(true);
   // Lightweight walk counts need long tasks only; non-scroll samples may not start the animation-frame observer.
   if(includeLongTaskTrace && includePhases) expect(loafObserved, 'long-animation-frame observer is not supported in the diagnostic browser').not.toBe(false);
-  const rpcCalls = rpcInvocationsInWindow(rpcRawCalls, timeOrigin, boundary.startedAtMs, boundary.ms).map((call) => ({
+  const rpcCalls = rpcInvocationsInMeasurementWindow(rpcRawCalls, timeOrigin, boundary).map((call) => ({
     method: call.method,
     startedAtMs: call.startedAtEpochMs - timeOrigin - boundary.startedAtMs,
     durationMs: call.durationMs,
@@ -548,13 +547,19 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
   // Pair the trace position with its start time so a later trace reset cannot silently remap a boundary span.
   // The app trace carries no call id, and base bundles must not need one.
   const serverRpcClientCalls = captureServerRpcClientCalls
-    ? rpcInvocationsInWindow(rpcRawCalls.map((call, callId) => ({...call, callId})).filter((call) => call.method === 'messages.getHistory'), timeOrigin, boundary.startedAtMs, boundary.ms)
+    ? rpcInvocationsInMeasurementWindow(rpcRawCalls.map((call, callId) => ({...call, callId})).filter((call) => call.method === 'messages.getHistory' && typeof call.historyPeer === 'string'), timeOrigin, boundary)
     : undefined;
   const serverRpcGateWindow = captureServerRpcClientCalls ? {
     startEpochMs: timeOrigin + boundary.startedAtMs,
     endEpochMs: timeOrigin + boundary.startedAtMs + boundary.ms
   } : undefined;
-  const rpcCallCount = metrics.rpcSpansRecorded ? rpcInvocationsInWindow(rpcInvocations, timeOrigin, boundary.startedAtMs, boundary.ms).length : metrics.rpcCallCount;
+  const serverRpcInteractionWindow = captureServerRpcClientCalls ? {
+    startEpochMs: timeOrigin + boundary.rpcStartedAtMs!,
+    endEpochMs: timeOrigin + boundary.startedAtMs + boundary.ms
+  } : undefined;
+  const rpcCallCount = metrics.rpcSpansRecorded ? rpcInvocationsInMeasurementWindow(rpcInvocations, timeOrigin, boundary).length : metrics.rpcCallCount;
+  const rpcStartedAtMs = boundary.rpcStartedAtMs ?? boundary.startedAtMs;
+  const rpcElapsedMs = boundary.startedAtMs + boundary.ms - rpcStartedAtMs;
   const longTaskSummary = summarizeLongTaskWindow(longTasks, boundary.startedAtMs, boundary.ms);
   const rpcSummary = summarizeRpcTrace(rpcCalls, boundary.ms);
   const longTaskTrace = includeLongTaskTrace || collectWalkDiagnostics
@@ -564,10 +569,12 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
   return {
     ...metrics,
     rpcCallCount,
-    ...(metrics.rpcSpansRecorded ? {rpcMethodCounts: rpcMethodCounts(rpcInvocations, timeOrigin, boundary.startedAtMs, boundary.ms)} : {}),
+    ...(metrics.rpcSpansRecorded ? {rpcMethodCounts: rpcMethodCounts(rpcInvocations, timeOrigin, rpcStartedAtMs, rpcElapsedMs)} : {}),
     rpcCalls,
     ...(serverRpcClientCalls ? {serverRpcClientCalls} : {}),
     ...(serverRpcGateWindow ? {serverRpcGateWindow} : {}),
+    ...(serverRpcInteractionWindow ? {serverRpcInteractionWindow} : {}),
+    ...(captureServerRpcClientCalls && includePhases ? {serverRpcCompleteTrace: {timeOrigin, invocations: rpcInvocations, calls: rpcRawCalls}} : {}),
     bundleBytes: sumBundleBytes(bundleResources, origin, boundary.startedAtMs, resourceCaptureEndedAt, resourceUrlBaseline),
     ...longTaskSummary,
     ...(includeLongTaskTrace || collectWalkDiagnostics ? {longTaskTrace} : {}),
@@ -1027,29 +1034,13 @@ async function waitForHistorySettled(page: Page) {
   }, {timeout: 60_000, intervals: [100]}).toBe(true);
 }
 
-async function waitForPartnerDialogHistoryPrefetch(page: Page, peerId: PeerId) {
-  await page.waitForFunction((peerId) => {
-    const queue = (window as any).appDialogsManager?.lazyLoadQueue;
-    if(!Array.isArray(queue?.queue) || !(queue?.inProcess instanceof Set)) {
-      throw new Error('chat-list history lazy-load queue is unavailable');
-    }
-
-    const rows = [...document.querySelectorAll<HTMLElement>(`#chatlist-container .chatlist-chat[data-peer-id="${peerId}"]`)];
-    if(!rows.length) throw new Error(`fixture peer ${peerId} has no chat-list row before the cold history flush`);
-
-    // A visible dialog can fetch its preview history independently of the click. Wait for that
-    // request to finish before clearing the cache, or its late response can warm the measured gate.
-    return ![...queue.queue, ...queue.inProcess].some((item) => rows.includes(item.div));
-  }, peerId, {timeout: 60_000, polling: 20});
-}
-
 async function prepareColdChatOpenStartState(page: Page, fixture: Fixture) {
   await page.evaluate(async(peerId) => {
     const appImManager = (window as any).appImManager;
     if(appImManager.chat?.peerId) await appImManager.setPeer({});
     if(appImManager.chat?.peerId) throw new Error(`chat-open start state still has active peer ${appImManager.chat.peerId}`);
   }, fixture.partner);
-  await waitForPartnerDialogHistoryPrefetch(page, fixture.partner);
+  await waitForPartnerDialogHistoryPrefetch(page, fixture.partner, false);
   await page.evaluate(async(peerId) => {
     // Wait for the manager RPC to enqueue its fire-and-forget mirror deletions before issuing the port barrier.
     await (window as any).rootScope.managers.appMessagesManager.flushStoragesByPeerId(peerId);
@@ -1058,17 +1049,8 @@ async function prepareColdChatOpenStartState(page: Page, fixture: Fixture) {
   await expect(page.locator(`.bubbles .bubble[data-peer-id="${fixture.partner}"]:visible`)).toHaveCount(0, {timeout: 5_000});
 }
 
-function expectChatOpenHistoryCall(sample: Metric, description: string) {
-  const calls = sample.serverRpcClientCalls;
-  if(!Array.isArray(calls) || !calls.length) {
-    throw new Error(`${description} has no in-gate client messages.getHistory spans; RPC sample ${JSON.stringify({
-      rpcCallCount: sample.rpcCallCount,
-      rpcCalls: sample.rpcCalls
-    })}`);
-  }
-}
-
 async function finalizeServerRpcTrace(page: Page, sample: Metric, requireClientHistoryCall = false) {
+  if(requireClientHistoryCall) requireFixtureHistoryCall(sample.serverRpcClientCalls, sample.serverRpcFixturePeer);
   const offset = serverRpcTraceOffsetsBySample.get(sample);
   if(offset === undefined) return sample;
 
@@ -1079,9 +1061,6 @@ async function finalizeServerRpcTrace(page: Page, sample: Metric, requireClientH
     throw new Error(`100x chat-open sample has invalid or duplicate client RPC identities: ${JSON.stringify(callIds)}`);
   }
   if(!callIds.length) {
-    if(requireClientHistoryCall) {
-      throw new Error(`cold 100x chat-open sample has no in-gate client messages.getHistory spans; RPC sample ${JSON.stringify(sample.rpcCalls)}`);
-    }
     sample.serverRpcClientCalls = [];
     Object.assign(sample, await attachServerRpcTrace(sample, offset));
     return sample;
@@ -1124,18 +1103,29 @@ async function reloadChatList(page: Page, requests: {value: number}, collectWalk
 async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture, traceRpc = false, collectWalkDiagnostics = false, collectServerRpcTrace = false) {
   const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
-  if(collectServerRpcTrace) await waitForPartnerDialogHistoryPrefetch(page, fixture.partner);
-  resetRequestBreakdown(page);
-  await begin(page, requests, true, traceRpc);
-  await startMeasurementAtClick(row);
-  const traceOffset = collectServerRpcTrace ? serverRpcTraceOffset() : undefined;
-  await row.click();
-  const boundary = await waitForFirstVisibleBubble(page);
-  expect(Number.isFinite(boundary.preInteractionMs), 'chat-open timer did not start on the row click').toBe(true);
-  const sample = await capture(page, requests, boundary, false, false, collectWalkDiagnostics, false, collectWalkDiagnostics, traceRpc, collectServerRpcTrace);
-  if(!collectServerRpcTrace) return sample;
-  serverRpcTraceOffsetsBySample.set(sample, traceOffset);
-  return sample;
+  const measure = async() => {
+    resetRequestBreakdown(page);
+    await begin(page, requests, true, traceRpc);
+    await startMeasurementAtClick(row, collectServerRpcTrace, collectServerRpcTrace);
+    const traceOffset = collectServerRpcTrace ? serverRpcTraceOffset() : undefined;
+    await row.click();
+    const boundary = await waitForFirstVisibleBubble(page);
+    expect(Number.isFinite(boundary.preInteractionMs), 'chat-open timer did not start on the row click').toBe(true);
+    if(collectServerRpcTrace) expect(Number.isFinite(boundary.rpcStartedAtMs), 'chat-open RPC window did not start on the row mousedown').toBe(true);
+    const sample = await capture(page, requests, boundary, false, false, collectWalkDiagnostics, false, collectWalkDiagnostics, traceRpc, collectServerRpcTrace);
+    if(collectServerRpcTrace) {
+      expect(sample.prefetchReleasedAtMouseDown, 'chat-list prefetch was not released at the measured mousedown').toBe(true);
+      serverRpcTraceOffsetsBySample.set(sample, traceOffset);
+    }
+    return sample;
+  };
+  if(!collectServerRpcTrace) return measure();
+  await waitForPartnerDialogHistoryPrefetch(page, fixture.partner);
+  // Keep older preview handlers outside the RPC window; resume queued work at mousedown.
+  return withLockedDialogHistoryPrefetch(page, async() => {
+    await waitForDialogHistoryPrefetches(page);
+    return measure();
+  });
 }
 
 async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean, options: ScrollBackTraceOptions = {}): Promise<MetricWithPendingPresentedFrameCounts | undefined> {
@@ -1950,6 +1940,170 @@ test.beforeAll(async({browser}) => {
   }
 });
 
+test('cold fixture chat does not accept another peer history RPC', async({browser}) => {
+  const fixture = fixtures['100x']!;
+  const otherPeer = fixture.contacts.find((peerId) => peerId !== fixture.partner);
+  expect(otherPeer, '100x fixture needs another contact').toBeTruthy();
+  const traceOrigin = process.env.PERF_TRACE_HEAD_ORIGIN_100X;
+  expect(traceOrigin, '100x traced head origin is missing').toBeTruthy();
+  const run = withOrigin(preparedVariants['100x'].head!, 'head', traceOrigin!);
+  const context = await browser.newContext({ignoreHTTPSErrors: true, viewport: {width: 1280, height: 800}, storageState: run.storageState});
+  try {
+    const page = await context.newPage();
+    const requests = {value: 0};
+    await installInstrumentation(page, requests, run.origin, false, true);
+    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    await page.evaluate(async() => { await (window as any).rootScope.managers.appUsersManager.getContacts(undefined, false, 'none'); });
+    await withLockedDialogHistoryPrefetch(page, async() => {
+      await prepareColdChatOpenStartState(page, fixture);
+      const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
+      await expect(row).toBeVisible();
+      await beginScenario(page, requests, true);
+      await page.evaluate((partner) => {
+        const proxy = (window as any).apiManagerProxy;
+        const original = proxy.invoke;
+        const perf = (window as any).__teagramPerf;
+        perf.suppressedFixtureHistory = 0;
+        proxy.invoke = function(method: string, payload: any, ...args: any[]) {
+          if(method === 'manager' && payload?.name === 'appMessagesManager' && payload?.method === 'getHistory' &&
+            payload?.args?.[0]?.peerId === partner) {
+            ++perf.suppressedFixtureHistory;
+            return new Promise(() => {});
+          }
+          return original.call(this, method, payload, ...args);
+        };
+      }, fixture.partner);
+      await startMeasurementAtClick(row, true);
+      await row.hover();
+      await page.mouse.down();
+      await expect.poll(() => page.evaluate(() => (window as any).__teagramPerf.suppressedFixtureHistory), {timeout: 30_000}).toBeGreaterThan(0);
+      await page.evaluate(async(peerId) => {
+        const managers = (window as any).rootScope.managers;
+        const peer = await managers.appPeersManager.getInputPeerById(peerId);
+        await managers.apiManager.invokeApi('messages.getHistory', {peer, offset_id: 0, offset_date: 0, add_offset: 0, limit: 1, max_id: 0, min_id: 0, hash: 0});
+      }, otherPeer);
+      await page.mouse.up();
+      const evidence = await page.evaluate(async() => {
+        const perf = (window as any).__teagramPerf;
+        return {
+          timeOrigin: performance.timeOrigin,
+          mouseDown: perf.rpcStartedAtMs,
+          click: perf.clickAt,
+          ended: performance.now(),
+          trace: await (window as any).rootScope.managers.apiManager.getPerformanceRpcTrace()
+        };
+      });
+      const tracePath = test.info().outputPath('cold-chat-peer-trace.json');
+      writeFileSync(tracePath, JSON.stringify({fixturePeer: fixture.partner, otherPeer, ...evidence}));
+      await test.info().attach('cold-chat-peer-trace', {path: tracePath, contentType: 'application/json'});
+      expect(Number.isFinite(evidence.mouseDown)).toBe(true);
+      const calls = rpcInvocationsBetween(evidence.trace.calls as ServerRpcClientCall[], evidence.timeOrigin, evidence.mouseDown, evidence.ended);
+      expect(calls.some((call) => call.historyPeer === `user:${otherPeer}`)).toBe(true);
+      expect(() => requireFixtureHistoryCall(calls, `user:${fixture.partner}`)).toThrow(/fixture.*messages\.getHistory/);
+    });
+  } finally {
+    await context.close();
+  }
+});
+
+test('captures the cold fixture chat history RPC', async({browser}) => {
+  const fixture = fixtures['100x']!;
+  const traceOrigin = process.env.PERF_TRACE_HEAD_ORIGIN_100X;
+  expect(traceOrigin, '100x traced head origin is missing').toBeTruthy();
+  const run = withOrigin(preparedVariants['100x'].head!, 'head', traceOrigin!);
+  const context = await browser.newContext({ignoreHTTPSErrors: true, viewport: {width: 1280, height: 800}, storageState: run.storageState});
+  try {
+    const page = await context.newPage();
+    const requests = {value: 0};
+    await installInstrumentation(page, requests, run.origin, false, true);
+    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    await withLockedDialogHistoryPrefetch(page, async() => {
+      await prepareColdChatOpenStartState(page, fixture);
+      const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
+      await expect(row).toBeVisible();
+      await beginScenario(page, requests, true);
+      const offset = serverRpcTraceOffset();
+      await startMeasurementAtClick(row, true);
+      await row.click();
+      const boundary = await waitForFirstVisibleBubble(page);
+      expect(Number.isFinite(boundary.rpcStartedAtMs)).toBe(true);
+      const sample = {...await capture(page, requests, boundary, false, true, true, false, false, true, true), serverRpcFixturePeer: `user:${fixture.partner}`};
+      const tracePath = test.info().outputPath('cold-chat-open-trace.json');
+      writeFileSync(tracePath, JSON.stringify(sample));
+      await test.info().attach('cold-chat-open-trace', {path: tracePath, contentType: 'application/json'});
+      serverRpcTraceOffsetsBySample.set(sample, offset);
+      await finalizeServerRpcTrace(page, sample, true);
+    });
+  } finally {
+    await context.close();
+  }
+});
+
+test('cold fixture chat can start its history RPC before click', async({browser}) => {
+  const fixture = fixtures['100x']!;
+  const traceOrigin = process.env.PERF_TRACE_HEAD_ORIGIN_100X;
+  expect(traceOrigin, '100x traced head origin is missing').toBeTruthy();
+  const run = withOrigin(preparedVariants['100x'].head!, 'head', traceOrigin!);
+  const context = await browser.newContext({ignoreHTTPSErrors: true, viewport: {width: 1280, height: 800}, storageState: run.storageState});
+  try {
+    const page = await context.newPage();
+    const requests = {value: 0};
+    await installInstrumentation(page, requests, run.origin, false, true);
+    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    await withLockedDialogHistoryPrefetch(page, async() => {
+      await prepareColdChatOpenStartState(page, fixture);
+      const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
+      await expect(row).toBeVisible();
+      await beginScenario(page, requests, true);
+      const offset = serverRpcTraceOffset();
+      await startMeasurementAtClick(row, true);
+      await row.hover();
+      await page.mouse.down();
+      await expect.poll(async() => page.evaluate(async(peerId) => {
+        const trace = await (window as any).rootScope.managers.apiManager.getPerformanceRpcTrace();
+        return trace.calls.some((call: {historyPeer?: string}) => call.historyPeer === `user:${peerId}`);
+      }, fixture.partner), {timeout: 30_000}).toBe(true);
+      await page.mouse.up();
+      const clickRetried = !await page.evaluate(() => Number.isFinite((window as any).__teagramPerf.clickAt));
+      if(clickRetried) await row.click();
+      const boundary = await waitForFirstVisibleBubble(page);
+      const sample = {...await capture(page, requests, boundary, false, true, true, false, false, true, true), serverRpcFixturePeer: `user:${fixture.partner}`};
+      const tracePath = test.info().outputPath('cold-chat-early-history-trace.json');
+      writeFileSync(tracePath, JSON.stringify({clickRetried, ...sample}));
+      await test.info().attach('cold-chat-early-history-trace', {path: tracePath, contentType: 'application/json'});
+      const targetCalls = sample.serverRpcClientCalls!.filter((call) => call.historyPeer === sample.serverRpcFixturePeer);
+      expect(targetCalls.some((call) => call.startedAtEpochMs < sample.serverRpcGateWindow!.startEpochMs)).toBe(true);
+      serverRpcTraceOffsetsBySample.set(sample, offset);
+      await finalizeServerRpcTrace(page, sample, true);
+    });
+  } finally {
+    await context.close();
+  }
+});
+
+test('warm fixture chat drains dialog prefetches before its RPC window', async({browser}) => {
+  const fixture = fixtures['100x']!;
+  const traceOrigin = process.env.PERF_TRACE_HEAD_ORIGIN_100X;
+  expect(traceOrigin, '100x traced head origin is missing').toBeTruthy();
+  const run = withOrigin(preparedVariants['100x'].head!, 'head', traceOrigin!);
+  const context = await browser.newContext({ignoreHTTPSErrors: true, viewport: {width: 1280, height: 800}, storageState: run.storageState});
+  try {
+    const page = await context.newPage();
+    const requests = {value: 0};
+    await installInstrumentation(page, requests, run.origin, false, true);
+    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    const sample = await openPartnerChat(page, requests, fixture, true, false, true);
+    expect(sample.prefetchReleasedAtMouseDown).toBe(true);
+    await finalizeServerRpcTrace(page, sample);
+  } finally {
+    await context.close();
+  }
+});
+
 test('measures first animated sticker frame after opening a chat', async({browser}) => {
   expect(reportPath).toBeTruthy();
   measurementsStarted = true;
@@ -2232,28 +2386,35 @@ async function traceTargetScenarios(browser: Browser, runs: Partial<Record<Varia
 
         const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
         await expect(row).toBeVisible({timeout: 60_000});
-        await prepareColdChatOpenStartState(page, fixture);
-        await beginScenario(page, requests, true);
-        await installPeerChangeTracing(page);
-        const chatProfile = await startCpuProfile(page);
-        const serverTraceOffset = serverRpcTraceOffset();
-        await startMeasurementAtClick(row);
-        await row.click();
-        const chatOpenBoundary = await waitForFirstVisibleBubble(page);
-        const chatCpu = await finishCpuProfile(chatProfile);
-        const chatOpenCapture = await capture(page, requests, chatOpenBoundary, false, true, true, false, false, true, true);
-        const chatOpenSample = {
-          ...chatOpenCapture,
-          cpu: chatCpu,
-          peerChangePhases: summarizePerformancePhases(await page.evaluate(() => {
-            const perf = (window as any).__teagramPerf;
-            const offset = perf.clickAt - perf.peerChangeBase;
-            return (perf.peerChangePhases || []).map((phase: {startMs: number}) => ({...phase, startMs: Number((phase.startMs - offset).toFixed(1))}));
-          }))
-        };
-        expectChatOpenHistoryCall(chatOpenSample, `${variant} 100x chatOpen RPC diagnostic`);
-        serverRpcTraceOffsetsBySample.set(chatOpenSample, serverTraceOffset);
-        await finalizeServerRpcTrace(page, chatOpenSample, true);
+        const chatOpenSample = await withLockedDialogHistoryPrefetch(page, async() => {
+          await prepareColdChatOpenStartState(page, fixture);
+          await beginScenario(page, requests, true);
+          await installPeerChangeTracing(page);
+          const chatProfile = await startCpuProfile(page);
+          const serverTraceOffset = serverRpcTraceOffset();
+          await startMeasurementAtClick(row, true);
+          await row.click();
+          const chatOpenBoundary = await waitForFirstVisibleBubble(page);
+          expect(Number.isFinite(chatOpenBoundary.rpcStartedAtMs), 'chat-open RPC window did not start on the row mousedown').toBe(true);
+          const chatCpu = await finishCpuProfile(chatProfile);
+          const chatOpenCapture = await capture(page, requests, chatOpenBoundary, false, true, true, false, false, true, true);
+          const chatOpenSample = {
+            ...chatOpenCapture,
+            serverRpcFixturePeer: `user:${fixture.partner}`,
+            cpu: chatCpu,
+            peerChangePhases: summarizePerformancePhases(await page.evaluate(() => {
+              const perf = (window as any).__teagramPerf;
+              const offset = perf.clickAt - perf.peerChangeBase;
+              return (perf.peerChangePhases || []).map((phase: {startMs: number}) => ({...phase, startMs: Number((phase.startMs - offset).toFixed(1))}));
+            }))
+          };
+          const diagnosticEvidence = report.diagnostics['100x'] ||= {};
+          const chatOpenAttempts = (diagnosticEvidence.chatOpenAttempts ||= []) as Array<{variant: Variant, sample: Metric}>;
+          chatOpenAttempts.push({variant, sample: chatOpenSample});
+          serverRpcTraceOffsetsBySample.set(chatOpenSample, serverTraceOffset);
+          await finalizeServerRpcTrace(page, chatOpenSample, true);
+          return chatOpenSample;
+        });
         traceSamples.chatOpen.push(chatOpenSample);
         await addCachedDialogReconcileTarget(page, reconcileTargets, chatOpenSample, 'chatOpen');
 
@@ -2400,7 +2561,7 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
       });
     }
   }
-  report.diagnostics['100x'] = {...traceDiagnostics, walkComparison};
+  report.diagnostics['100x'] = {...report.diagnostics['100x'], ...traceDiagnostics, walkComparison};
   measurementsComplete = true;
 });
 

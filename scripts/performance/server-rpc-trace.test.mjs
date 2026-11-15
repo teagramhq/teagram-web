@@ -12,6 +12,21 @@ const record = (method, duration_us = 40_123) => JSON.stringify({
   end_unix_ms: 1_762_800_000_123
 });
 
+test('cold chat-open rejects an unrelated peer history request', async() => {
+  const {requireFixtureHistoryCall} = await import('./server-rpc-trace.mjs');
+  const unrelated = {method: 'messages.getHistory', historyPeer: 'user:3'};
+  assert.throws(() => requireFixtureHistoryCall([unrelated], 'user:2'), /fixture.*messages\.getHistory/i);
+  assert.throws(() => requireFixtureHistoryCall([], 'user:2'), /fixture.*messages\.getHistory/i);
+  assert.doesNotThrow(() => requireFixtureHistoryCall([unrelated, {...unrelated, historyPeer: 'user:2'}], 'user:2'));
+});
+
+test('zero-call validation includes server history before the click', async() => {
+  const {requireNoUncorrelatedHistoryRecords} = await import('./server-rpc-trace.mjs');
+  const records = [{method: 'messages.getHistory', duration_us: 5_000, result: 'success', end_unix_ms: 95}];
+  assert.throws(() => requireNoUncorrelatedHistoryRecords(records, {startEpochMs: 80, endEpochMs: 160}), /uncorrelated server messages\.getHistory/);
+  assert.doesNotThrow(() => requireNoUncorrelatedHistoryRecords(records, {startEpochMs: 100, endEpochMs: 160}));
+});
+
 test('server RPC trace expects no records when the client sample issued no calls', () => {
   assert.deepEqual(serverRpcTraceExpectation(0), {minimumCount: 0});
   assert.deepEqual(serverRpcTraceExpectation(undefined), {minimumCount: 1});

@@ -1,7 +1,7 @@
 import {mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {evaluatePairedDifferences, evaluatePerformance, formatPerformanceTable, formatPerformanceTraceTable, PAIRED_CONFIDENCE_LEVEL, PERFORMANCE_REPEATS, TIMING_MINIMUM_EFFECTS} from './policy.mjs';
-import {clientRpcIntervalUnionMs, SERVER_RPC_TRACE_CLOCK_TOLERANCE_MS, serverRpcIntervalUnionMs, serverRpcRecordMatchesClientCall, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls, serverRpcTraceExpectation} from './server-rpc-trace.mjs';
+import {clientRpcIntervalUnionMs, hasFixtureHistoryCall, SERVER_RPC_TRACE_CLOCK_TOLERANCE_MS, serverRpcIntervalUnionMs, serverRpcRecordMatchesClientCall, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls, serverRpcTraceExpectation} from './server-rpc-trace.mjs';
 import {hasValidGlobalSearchStages} from './global-search-measurement.mjs';
 
 const reportPath = resolve(process.env.PERF_REPORT_PATH || '.performance-report.json');
@@ -83,6 +83,15 @@ function formatChatOpenServerTimingTable(report, failures) {
         failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has missing or duplicate client RPC identities`);
         continue;
       }
+      const interactionWindow = sample.serverRpcInteractionWindow;
+      const gateWindow = sample.serverRpcGateWindow;
+      if(!interactionWindow || !Number.isFinite(interactionWindow.startEpochMs) || !Number.isFinite(interactionWindow.endEpochMs) ||
+        !gateWindow || !Number.isFinite(gateWindow.startEpochMs) || !Number.isFinite(gateWindow.endEpochMs) ||
+        interactionWindow.startEpochMs > gateWindow.startEpochMs || interactionWindow.endEpochMs <= interactionWindow.startEpochMs ||
+        Math.abs(interactionWindow.endEpochMs - gateWindow.endEpochMs) > 0.01) {
+        failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has a missing or invalid RPC interaction window`);
+        continue;
+      }
       if(clientHistoryCallCount === 0) {
         if(source === 'RPC diagnostic') {
           failures.push(`cold 100x chatOpen RPC diagnostic ${variant} sample ${index + 1} has no client messages.getHistory span`);
@@ -96,13 +105,16 @@ function formatChatOpenServerTimingTable(report, failures) {
           failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} is missing total, RPC wall, or non-RPC timing`);
           continue;
         }
-        const gateWindow = sample.serverRpcGateWindow;
         if(!gateWindow || !Number.isFinite(gateWindow.startEpochMs) || !Number.isFinite(gateWindow.endEpochMs) || gateWindow.endEpochMs <= gateWindow.startEpochMs ||
           Math.abs((gateWindow.endEpochMs - gateWindow.startEpochMs) - sample.ms) > 0.01) {
           failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has a missing or invalid RPC gate window`);
           continue;
         }
         rows.push(`| ${source} | ${variant} | ${index + 1} | ${show(sample.ms)} | ${show(sample.rpcWallMs)} | ${show(sample.nonRpcElapsedMs)} | none (no getHistory in gate window) | 0.0 |`);
+        continue;
+      }
+      if(source === 'RPC diagnostic' && !hasFixtureHistoryCall(clientHistoryCalls, sample.serverRpcFixturePeer)) {
+        failures.push(`cold 100x chatOpen RPC diagnostic ${variant} sample ${index + 1} has no fixture ${sample.serverRpcFixturePeer} messages.getHistory span`);
         continue;
       }
       const expectation = Number.isSafeInteger(clientHistoryCallCount) ? serverRpcTraceExpectation(clientHistoryCallCount) : undefined;
@@ -119,7 +131,6 @@ function formatChatOpenServerTimingTable(report, failures) {
         failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} cannot correlate server messages.getHistory records to client spans`);
         continue;
       }
-      const gateWindow = sample.serverRpcGateWindow;
       if(!gateWindow || !Number.isFinite(gateWindow.startEpochMs) || !Number.isFinite(gateWindow.endEpochMs) || gateWindow.endEpochMs <= gateWindow.startEpochMs ||
         Math.abs((gateWindow.endEpochMs - gateWindow.startEpochMs) - sample.ms) > 0.01) {
         failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has a missing or invalid RPC gate window`);
