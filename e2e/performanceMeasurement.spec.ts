@@ -116,18 +116,48 @@ test('starts the measured window when the browser dispatches the click', async({
   expect(measurement.started).toBe(measurement.clickAt);
 });
 
-test('starts when the peer row is replaced after arming the click', async({page}) => {
+test('records the mouse and click when the peer row is replaced after arming', async({page}) => {
   await page.setContent('<button class="chatlist-chat" data-peer-id="42">Open chat</button>');
   await page.evaluate(() => {
     (window as any).__teagramPerf = {started: performance.now()};
   });
   const row = page.locator('.chatlist-chat[data-peer-id="42"]');
-  await startMeasurementAtClick(row);
+  await startMeasurementAtClick(row, true);
   await row.evaluate((element) => element.replaceWith(element.cloneNode(true)));
   await page.locator('.chatlist-chat[data-peer-id="42"]').click();
 
-  const clickAt = await page.evaluate(() => (window as any).__teagramPerf.clickAt);
+  const {clickAt, rpcStartedAtMs} = await page.evaluate(() => (window as any).__teagramPerf);
   expect(Number.isFinite(clickAt)).toBe(true);
+  expect(Number.isFinite(rpcStartedAtMs)).toBe(true);
+  expect(rpcStartedAtMs).toBeLessThanOrEqual(clickAt);
+});
+
+test('includes history started by a chat row mousedown in the measurement window', async({page}) => {
+  await page.setContent('<button class="chatlist-chat" data-peer-id="42">Open chat</button><main class="bubbles"></main>');
+  await page.evaluate(() => {
+    (window as any).__teagramPerf = {started: performance.now()};
+    document.querySelector('.chatlist-chat')!.addEventListener('mousedown', () => {
+      (window as any).historyRequestAt = performance.now();
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      bubble.dataset.mid = '1';
+      bubble.dataset.peerId = '42';
+      bubble.style.cssText = 'display:block;width:10px;height:10px';
+      document.querySelector('.bubbles')!.append(bubble);
+    });
+  });
+  const row = page.locator('.chatlist-chat[data-peer-id="42"]');
+  await startMeasurementAtClick(row, true);
+  await row.hover();
+  await page.mouse.down();
+  await page.waitForTimeout(30);
+  await page.mouse.up();
+
+  const boundary = await waitForFirstVisibleBubble(page);
+  const historyRequestAt = await page.evaluate(() => (window as any).historyRequestAt as number);
+  expect(boundary.rpcStartedAtMs).toBeLessThanOrEqual(historyRequestAt);
+  expect(boundary.startedAtMs).toBeGreaterThan(historyRequestAt);
+  expect(boundary.startedAtMs + boundary.ms).toBeGreaterThanOrEqual(historyRequestAt);
 });
 
 test('records the first visible bubble when it is mounted', async({page}) => {

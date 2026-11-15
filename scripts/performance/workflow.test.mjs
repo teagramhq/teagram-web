@@ -789,7 +789,7 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   assert.ok(capture, 'the capture helper must be present');
   assert.match(capture, /captureRpcTrace/);
   assert.match(capture, /serverRpcGateWindow/);
-  assert.match(capture, /rpcInvocationsInWindow\(rpcRawCalls\.map\(\(call, callId\) => \(\{\.\.\.call, callId\}\)\)\.filter\(\(call\) => call\.method === 'messages\.getHistory'\), timeOrigin, boundary\.startedAtMs, boundary\.ms\)/, 'base bundles keep trace positions paired with start times without adding app trace call ids');
+  assert.match(capture, /rpcInvocationsInMeasurementWindow\(rpcRawCalls\.map\(\(call, callId\) => \(\{\.\.\.call, callId\}\)\)\.filter\(\(call\) => call\.method === 'messages\.getHistory'\), timeOrigin, boundary\)/, 'base bundles keep trace positions paired with start times without adding app trace call ids');
   assert.doesNotMatch(performanceTrace, /callId/, 'the app trace must not grow a call id that base bundles lack');
   assert.ok(openPartnerChat, 'the chat-open helper must be present');
   assert.doesNotMatch(openPartnerChat, /waitForHistorySettled/);

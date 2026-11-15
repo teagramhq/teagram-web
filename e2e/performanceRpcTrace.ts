@@ -414,6 +414,11 @@ export function rpcInvocationsInWindow<T extends {startedAtEpochMs: number}>(cal
   return rpcInvocationsBetween(calls, timeOrigin, startedAtMs, startedAtMs + elapsedMs);
 }
 
+export function rpcInvocationsInMeasurementWindow<T extends {startedAtEpochMs: number}>(calls: T[], timeOrigin: number, boundary: {startedAtMs: number, ms: number, rpcStartedAtMs?: number}): T[] {
+  const startedAtMs = boundary.rpcStartedAtMs ?? boundary.startedAtMs;
+  return rpcInvocationsBetween(calls, timeOrigin, startedAtMs, boundary.startedAtMs + boundary.ms);
+}
+
 export function rpcInvocationsBetween<T extends {startedAtEpochMs: number}>(calls: T[], timeOrigin: number, startedAtMs: number, endedAtMs: number): T[] {
   const start = timeOrigin + startedAtMs;
   const end = timeOrigin + endedAtMs;
@@ -430,7 +435,7 @@ export function rpcMethodCounts(calls: Array<{method: string, startedAtEpochMs: 
 export function summarizeRpcTrace(rpcCalls: PerformanceRpcCall[], elapsedMs: number): PerformanceRpcSummary {
   const intervals = rpcCalls.map(({startedAtMs, durationMs}) => {
     const start = Math.max(0, Math.min(elapsedMs, startedAtMs));
-    const end = Math.min(elapsedMs, start + (Number.isFinite(durationMs) ? Math.max(0, durationMs!) : elapsedMs - start));
+    const end = Number.isFinite(durationMs) ? Math.min(elapsedMs, startedAtMs + Math.max(0, durationMs!)) : elapsedMs;
     return {start, end};
   }).filter(({end, start}) => end > start).sort((left, right) => left.start - right.start);
 

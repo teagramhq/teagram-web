@@ -82,7 +82,10 @@ The 100x cold chat-list measurement uses fresh contexts and starts at navigation
 so the cold-load budget includes the document fetch.
 Chat-open timing starts when the browser dispatches the chat-list row's click;
 the separate `preInteractionMs` field records the time before that event so
-browser-driver delay does not count against client response time.
+browser-driver delay does not count against client response time. The 100x
+chat-open RPC trace also captures calls from the row's preceding mousedown,
+when the app starts opening the chat. RPC durations are clipped to the click
+timing window when calculating the reported wait.
 
 ## Fixture credentials and runner threat model
 

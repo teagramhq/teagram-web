@@ -46,6 +46,7 @@ export type DomNodeCounts = {
 export type FirstBubbleBoundary = {
   ms: number,
   startedAtMs: number,
+  rpcStartedAtMs?: number,
   domNodes: number,
   domClassCounts: Record<string, number>,
   domNodeCounts: DomNodeCounts,
@@ -115,31 +116,43 @@ export async function beginMeasurement(page: Page, requests: {value: number}, re
   }, {recordSpans: recordRpcSpans, traceEnabled, captureWorkerMessages});
 }
 
-export async function startMeasurementAtClick(target: Locator) {
-  await target.evaluate((element) => {
+export async function startMeasurementAtClick(target: Locator, captureMouseDown = false) {
+  await target.evaluate((element, captureMouseDown) => {
     const perf = (window as any).__teagramPerf as {
       started: number,
       preInteractionMs?: number,
       clickAt?: number,
+      rpcStartedAtMs?: number,
       peerId?: string,
       firstBubbleBoundary?: FirstBubbleBoundary
     };
     const armedAt = performance.now();
     perf.peerId = (element as HTMLElement).dataset.peerId;
-    const onClick = (event: MouseEvent) => {
+    perf.rpcStartedAtMs = undefined;
+    const matchesTarget = (event: MouseEvent) => {
       const peerRow = event.composedPath().find((target) =>
         target instanceof HTMLElement && target.classList.contains('chatlist-chat')
       ) as HTMLElement | undefined;
-      if(perf.peerId ? peerRow?.dataset.peerId !== perf.peerId : !event.composedPath().includes(element)) return;
+      return perf.peerId ? peerRow?.dataset.peerId === perf.peerId : event.composedPath().includes(element);
+    };
+    const onMouseDown = (event: MouseEvent) => {
+      if(event.button !== 0 || !matchesTarget(event)) return;
+      perf.rpcStartedAtMs = performance.now();
+      document.removeEventListener('mousedown', onMouseDown, true);
+    };
+    const onClick = (event: MouseEvent) => {
+      if(!matchesTarget(event)) return;
       document.removeEventListener('click', onClick, true);
+      if(captureMouseDown) document.removeEventListener('mousedown', onMouseDown, true);
       const clickAt = performance.now();
       perf.started = clickAt;
       perf.preInteractionMs = clickAt - armedAt;
       perf.clickAt = clickAt;
       perf.firstBubbleBoundary = undefined;
     };
+    if(captureMouseDown) document.addEventListener('mousedown', onMouseDown, true);
     document.addEventListener('click', onClick, true);
-  });
+  }, captureMouseDown);
 }
 
 export async function waitForFirstVisibleBubble(page: Page) {
@@ -165,6 +178,7 @@ export async function waitForFirstVisibleBubble(page: Page) {
       perf.firstBubbleBoundary = {
         ms,
         startedAtMs: perf.clickAt,
+        rpcStartedAtMs: perf.rpcStartedAtMs,
         domNodes: elements.length,
         domClassCounts,
         domNodeCounts: {
