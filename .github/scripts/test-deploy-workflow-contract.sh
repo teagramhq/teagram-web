@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Guards web image publication and the production k3s deployment flow.
+# GitHub and shell expressions are compared as literal text throughout this contract.
+# shellcheck disable=SC2016
 set -euo pipefail
 
 workflow="${DEPLOY_WORKFLOW:-.github/workflows/deploy.yml}"
@@ -447,6 +449,43 @@ SH
   fi
 )
 
+check_kubeconfig_validation() (
+  set -euo pipefail
+  local tmp good_config config case_name expected_host
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  query '.jobs.deploy-web.steps[] | select(.name == "Install the deploy kubeconfig") | .run' >"$tmp/install.sh"
+  good_config='{"apiVersion":"v1","kind":"Config","clusters":[{"name":"k3s","cluster":{"server":"https://teagram.tailaa4918.ts.net:6443","certificate-authority-data":"ZHVtbXktY2E="}}],"contexts":[{"name":"deploy","context":{"cluster":"k3s","user":"deploy"}}],"current-context":"deploy","users":[{"name":"deploy","user":{}}]}'
+  export RUNNER_TEMP="$tmp" GITHUB_ENV="$tmp/env"
+  : >"$GITHUB_ENV"
+  : >"$tmp/output"
+  GITHUB_OUTPUT="$tmp/output" KUBECONFIG_CONTENT="$good_config" bash -euo pipefail "$tmp/install.sh" >"$tmp/good.log" 2>&1 ||
+    fail 'a CA-pinned kubeconfig for the tailnet API must pass validation'
+  grep -Fxq "KUBECONFIG=$tmp/k8s/config" "$GITHUB_ENV" || fail 'validated kubeconfig must be exported'
+  printf -v expected_host '%s=%s' api_host teagram.tailaa4918.ts.net
+  grep -Fxq "$expected_host" "$tmp/output" || fail 'validated API host must be exposed for the ping'
+  [[ "$(stat -c '%a' "$tmp/k8s/config")" == 600 ]] || fail 'the kubeconfig must be private to the runner'
+
+  for case_name in wrong_server missing_ca empty_ca insecure_true insecure_false missing_context empty; do
+    case "$case_name" in
+      wrong_server) config="$(jq -c '.clusters[0].cluster.server = "https://wrong.example:6443"' <<<"$good_config")" ;;
+      missing_ca) config="$(jq -c 'del(.clusters[0].cluster."certificate-authority-data")' <<<"$good_config")" ;;
+      empty_ca) config="$(jq -c '.clusters[0].cluster."certificate-authority-data" = ""' <<<"$good_config")" ;;
+      insecure_true) config="$(jq -c '.clusters[0].cluster."insecure-skip-tls-verify" = true' <<<"$good_config")" ;;
+      insecure_false) config="$(jq -c '.clusters[0].cluster."insecure-skip-tls-verify" = false' <<<"$good_config")" ;;
+      missing_context) config="$(jq -c 'del(."current-context")' <<<"$good_config")" ;;
+      empty) config='' ;;
+    esac
+    : >"$GITHUB_ENV"
+    : >"$tmp/output"
+    if GITHUB_OUTPUT="$tmp/output" KUBECONFIG_CONTENT="$config" bash -euo pipefail "$tmp/install.sh" >"$tmp/$case_name.log" 2>&1; then
+      fail "kubeconfig validation accepted $case_name"
+    fi
+    [[ ! -s "$GITHUB_ENV" && ! -s "$tmp/output" ]] ||
+      fail "kubeconfig validation exported values for $case_name"
+  done
+)
+
 check_contract() {
   if [[ "${SKIP_PUBLICATION_CALL_GRAPH:-false}" != true ]]; then
     check_publication_call_graph
@@ -523,8 +562,30 @@ check_contract() {
     fail 'image pin verification must use the refreshed source SHA'
   [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Verify the source commit and image pin") | .env.IMAGE_DIGEST][0]')" == '${{ steps.refresh.outputs.image_digest }}' ]] ||
     fail 'image pin verification must use the refreshed image digest'
-  [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Install the deploy kubeconfig") | .env.KUBECONFIG_CONTENT][0]')" == '${{ secrets.KUBECONFIG }}' ]] ||
-    fail 'production kubeconfig must come from the environment secret'
+  [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Install the deploy kubeconfig")] | length')" == 1 &&
+    "$(query '[.jobs.deploy-web.steps[] | select(.name == "Install the deploy kubeconfig") | .id][0]')" == kubeconfig &&
+    "$(query '[.jobs.deploy-web.steps[] | select(.name == "Install the deploy kubeconfig") | .env.KUBECONFIG_CONTENT][0]')" == '${{ secrets.K3S_WEB_KUBECONFIG }}' ]] ||
+    fail 'production must validate the dedicated web kubeconfig secret and expose its API host'
+  [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Join the tailnet")] | length')" == 1 &&
+    "$(query '[.jobs.deploy-web.steps[] | select(.name == "Join the tailnet") | .uses][0]')" == 'tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd' &&
+    "$(query '[.jobs.deploy-web.steps[] | select(.name == "Join the tailnet") | .with."oauth-client-id"][0]')" == '${{ secrets.K3S_TS_OAUTH_CLIENT_ID }}' &&
+    "$(query '[.jobs.deploy-web.steps[] | select(.name == "Join the tailnet") | .with."oauth-secret"][0]')" == '${{ secrets.K3S_TS_OAUTH_SECRET }}' &&
+    "$(query '[.jobs.deploy-web.steps[] | select(.name == "Join the tailnet") | .with.tags][0]')" == 'tag:k3s-deploy' &&
+    "$(query '[.jobs.deploy-web.steps[] | select(.name == "Join the tailnet") | .with.ping][0]')" == '${{ steps.kubeconfig.outputs.api_host }}' ]] ||
+    fail 'tailnet join must use the k3s deploy client and ping the validated API host'
+  local kubeconfig_index tailnet_index deploy_index step_name
+  kubeconfig_index="$(query '.jobs.deploy-web.steps | to_entries | .[] | select(.value.name == "Install the deploy kubeconfig") | .key')"
+  tailnet_index="$(query '.jobs.deploy-web.steps | to_entries | .[] | select(.value.name == "Join the tailnet") | .key')"
+  deploy_index="$(query '.jobs.deploy-web.steps | to_entries | .[] | select(.value.name == "Deploy, verify the public route, and roll back on failure") | .key')"
+  [[ "$kubeconfig_index" =~ ^[0-9]+$ && "$tailnet_index" =~ ^[0-9]+$ && "$deploy_index" =~ ^[0-9]+$ ]] ||
+    fail 'deployment step indices must be present'
+  (( kubeconfig_index < tailnet_index && tailnet_index < deploy_index )) ||
+    fail 'kubeconfig validation and tailnet ping must precede deployment'
+  for step_name in 'Install the deploy kubeconfig' 'Join the tailnet' 'Deploy, verify the public route, and roll back on failure'; do
+    [[ "$(STEP_NAME="$step_name" query '[.jobs.deploy-web.steps[] | select(.name == strenv(STEP_NAME)) | .if // ""][0]')" == '' &&
+      "$(STEP_NAME="$step_name" query '[.jobs.deploy-web.steps[] | select(.name == strenv(STEP_NAME)) | ."continue-on-error" // false][0]')" == false ]] ||
+      fail "$step_name must stop on earlier failure"
+  done
   [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Remove the deploy kubeconfig") | .if][0]')" == '${{ always() }}' ]] ||
     fail 'the deploy kubeconfig must be removed after every deployment attempt'
 
@@ -557,6 +618,7 @@ check_contract() {
     [[ -n "$uses" ]] || continue
     [[ "$uses" =~ ^[^@]+@[0-9a-f]{40}$ ]] || fail "action not pinned to a commit SHA: $uses"
   done < <(query '.jobs[].steps[].uses // ""')
+  check_kubeconfig_validation
   check_target_selection
 }
 
@@ -583,6 +645,11 @@ self_test() {
     '(.jobs.deploy-web.steps[] | select(.uses | test("^actions/checkout@")) | .with.ref) = "${{ github.event.workflow_run.head_sha }}"'
     '(.jobs.deploy-web.steps[] | select(.uses | test("^actions/download-artifact@")) | .with."run-id") = "${{ github.run_id }}"'
     'del(.jobs.deploy-web.steps[] | select(.name == "Install the deploy kubeconfig").env.KUBECONFIG_CONTENT)'
+    '(.jobs.deploy-web.steps[] | select(.name == "Join the tailnet") | .with.tags) = "tag:wrong"'
+    'del(.jobs.deploy-web.steps[] | select(.name == "Join the tailnet").with.ping)'
+    '(.jobs.deploy-web.steps[] | select(.name == "Join the tailnet") | .with."oauth-secret") = "${{ secrets.OLD_SECRET }}"'
+    '(.jobs.deploy-web.steps[] | select(.name == "Join the tailnet") | ."continue-on-error") = true'
+    '(.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the public route, and roll back on failure") | .if) = "always()"'
     '.permissions.contents = "write"'
   )
 

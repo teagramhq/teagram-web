@@ -33,9 +33,12 @@ refreshes that selection after taking the serialized deployment slot, and
 checks its source commit and private-artifact digest before rendering the
 production overlay. Only the published source commit is checked out.
 
-The production job joins the tailnet, uses the `KUBECONFIG` secret from the
+The production job validates the CA-pinned `K3S_WEB_KUBECONFIG` secret from the
 `k3s-prod` GitHub environment, restricted to deployment branch `master`, and
-confirms that exactly one k3s Cloudflare connector pod is ready. It runs
+joins the tailnet as `tag:k3s-deploy` using `K3S_TS_OAUTH_CLIENT_ID` and
+`K3S_TS_OAUTH_SECRET`. It requires a successful tailnet ping of
+`teagram.tailaa4918.ts.net` and confirms that exactly one k3s Cloudflare
+connector pod is ready. It runs
 `kubectl apply --dry-run=server`, applies the
 rendered overlay, waits for the Deployment, then checks the public web route's
 root, JavaScript bundle, and `mtproto-target.json` source identity. If apply,
