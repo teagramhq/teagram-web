@@ -32,6 +32,9 @@ case "$1 $2" in
     fi
     count=$((count + 1))
     printf '%s\n' "$count" >"$STATUS_COUNT_FILE"
+    if [[ ( "${TEST_FAILURE:-}" == rollout || "${TEST_FAILURE:-}" == diagnostics || "${TEST_FAILURE:-}" == events || "${TEST_FAILURE:-}" == timeout ) && "$count" -eq 2 ]]; then
+      exit 1
+    fi
     if [[ "${TEST_FAILURE:-}" == status && "$count" -eq 3 ]]; then
       exit 1
     fi
@@ -47,6 +50,27 @@ case "$1 $2" in
     if [[ "${TEST_FAILURE:-}" == signal ]]; then
       kill -TERM "$PPID"
     fi
+    ;;
+  'get pods')
+    if [[ "${TEST_FAILURE:-}" == timeout ]]; then
+      sleep 20
+    fi
+    if [[ "${TEST_FAILURE:-}" == diagnostics ]]; then
+      echo 'pod diagnostics unavailable' >&2
+      exit 1
+    fi
+    cat <<'JSON'
+{"items":[{"metadata":{"name":"teagram-web-new"},"spec":{"nodeName":"node-1","containers":[{"env":[{"name":"PRIVATE","value":"literal-value-must-not-be-logged"}]}]},"status":{"phase":"Pending","containerStatuses":[{"name":"teagram-web","state":{"waiting":{"reason":"ImagePullBackOff","message":"image unavailable"}},"lastState":{"terminated":{"reason":"Error","exitCode":1,"message":"literal-termination-must-not-be-logged"}}}]}}]}
+JSON
+    ;;
+  'get events')
+    if [[ "${TEST_FAILURE:-}" == events ]]; then
+      echo 'event diagnostics unavailable' >&2
+      exit 1
+    fi
+    cat <<'JSON'
+{"items":[{"involvedObject":{"name":"teagram-web-new","kind":"Pod"},"reason":"FailedCreatePodSandBox","message":"sandbox failed"},{"involvedObject":{"name":"postgres-private","kind":"Pod"},"reason":"Private","message":"not-web-private-value"}]}
+JSON
     ;;
   'get deployment/teagram-web')
     count=0
@@ -98,6 +122,29 @@ SH
     fail "TERM must exit with status 143 after rollback; got $script_status"
   fi
 
+  if [[ "$expected_failure" == rollout || "$expected_failure" == diagnostics || "$expected_failure" == events || "$expected_failure" == timeout ]]; then
+    if [[ "$expected_failure" == events ]]; then
+      grep -Fq 'event diagnostics unavailable' "$output" || fail "$case_name hid the event read failure"
+    else
+      grep -Fq 'FailedCreatePodSandBox' "$output" || fail "$case_name did not report web pod events"
+    fi
+    if [[ "$expected_failure" == timeout ]]; then
+      grep -Fq 'could not collect pod diagnostics' "$output" || fail "$case_name hid the diagnostic timeout"
+    elif [[ "$expected_failure" != diagnostics ]]; then
+      grep -Fq 'ImagePullBackOff' "$output" || fail "$case_name did not report web pod status"
+    else
+      grep -Fq 'pod diagnostics unavailable' "$output" || fail "$case_name hid the diagnostic failure"
+    fi
+    if grep -Eq 'not-web-private-value|literal-value-must-not-be-logged|literal-termination-must-not-be-logged' "$output"; then
+      fail "$case_name exposed unrelated events, pod environment values, or termination logs"
+    fi
+    local events_line undo_line
+    events_line="$(grep -n '^get events ' "$log" | cut -d: -f1)"
+    undo_line="$(grep -n '^rollout undo ' "$log" | cut -d: -f1)"
+    [[ -n "$events_line" && "$events_line" -lt "$undo_line" ]] ||
+      fail "$case_name did not collect events before rollback"
+  fi
+
   if ! grep -Fqx 'rollout undo deployment/teagram-web --namespace teagram --to-revision=7' "$log"; then
     cat "$output" >&2
     fail "$case_name did not roll back to the previous revision"
@@ -134,5 +181,9 @@ run_case read read
 run_case signal signal
 run_case undo undo
 run_case status status
+run_case rollout rollout
+run_case diagnostics diagnostics
+run_case events events
+run_case timeout timeout
 
 printf 'k3s web deployment rollback behavior holds\n'

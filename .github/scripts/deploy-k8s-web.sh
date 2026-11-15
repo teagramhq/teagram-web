@@ -77,7 +77,7 @@ trap 'rollback_on_error 143' TERM
 [[ "$require_single_cloudflared" == true || "$require_single_cloudflared" == false ]] ||
   fail 'REQUIRE_SINGLE_CLOUDFLARED must be true or false'
 
-for command in kubectl jq node; do
+for command in kubectl jq node timeout; do
   command -v "$command" >/dev/null 2>&1 || fail "required command is missing: $command"
 done
 
@@ -112,7 +112,35 @@ previous_image=$(jq -er '
 kubectl apply --dry-run=server --filename "$manifest"
 deployment_started=true
 kubectl apply --filename "$manifest"
-kubectl rollout status "deployment/$deployment" --namespace "$namespace" --timeout="$rollout_timeout"
+if ! kubectl rollout status "deployment/$deployment" --namespace "$namespace" --timeout="$rollout_timeout"; then
+  printf 'web deploy: collecting pod diagnostics before rollback\n' >&2
+  if ! timeout --kill-after=1s 5s kubectl get pods --namespace "$namespace" \
+    --selector app.kubernetes.io/name=teagram-web --output json --request-timeout=4s | jq -c '
+      def container_status: {
+        name, ready, restartCount, waiting: .state.waiting,
+        terminated: (.state.terminated | {reason, exitCode, signal}),
+        previousTermination: (.lastState.terminated | {reason, exitCode, signal})
+      };
+      {pods: [.items[] | {
+        name: .metadata.name, node: .spec.nodeName, phase: .status.phase,
+        conditions: [.status.conditions[]? | {type, status, reason, message}],
+        containers: [.status.containerStatuses[]? | container_status],
+        initContainers: [.status.initContainerStatuses[]? | container_status]
+      }]}
+    '; then
+    printf 'web deploy: could not collect pod diagnostics\n' >&2
+  fi
+  if ! timeout --kill-after=1s 5s kubectl get events --namespace "$namespace" \
+    --field-selector involvedObject.kind=Pod --output json --request-timeout=4s | jq -c '
+      {events: [.items[] | select(.involvedObject.name | startswith("teagram-web-")) |
+        {name: .involvedObject.name, reason, message, type, count,
+          lastTimestamp: (.lastTimestamp // .eventTime // .metadata.creationTimestamp)}] |
+        sort_by(.lastTimestamp // "") | .[-50:]}
+    '; then
+    printf 'web deploy: could not collect pod events\n' >&2
+  fi
+  fail 'rollout did not complete'
+fi
 
 deployed_image=$(kubectl get "deployment/$deployment" --namespace "$namespace" --output json |
   jq -er '[.spec.template.spec.containers[] | select(.name == "teagram-web") | .image] |
