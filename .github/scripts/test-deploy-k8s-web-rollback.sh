@@ -29,6 +29,12 @@ run_case() {
 set -euo pipefail
 printf '%s\n' "$*" >>"$KUBECTL_LOG"
 
+stall_output() {
+  trap '' TERM
+  printf '%s\n' "$$" >"$KUBECTL_PID_FILE"
+  while :; do printf 'blocked diagnostic output\n'; done
+}
+
 case "$1 $2" in
   'rollout status')
     count=0
@@ -57,6 +63,9 @@ case "$1 $2" in
     fi
     ;;
   'get pods')
+    if [[ "${TEST_FAILURE:-}" == jq-pods ]]; then
+      stall_output
+    fi
     if [[ "${TEST_FAILURE:-}" == timeout ]]; then
       sleep 20
     fi
@@ -69,6 +78,9 @@ case "$1 $2" in
 JSON
     ;;
   'get events')
+    if [[ "${TEST_FAILURE:-}" == jq-events ]]; then
+      stall_output
+    fi
     if [[ "${TEST_FAILURE:-}" == events ]]; then
       echo 'event diagnostics unavailable' >&2
       exit 1
@@ -108,10 +120,8 @@ if [[ "${1:-}" == -c ]]; then
     [[ "${TEST_FAILURE:-}" == jq-events && "${2:-}" == *'involvedObject.name'* ]]; then
     printf 'jq:stall=%s\n' "$TEST_FAILURE" >>"$KUBECTL_LOG"
     trap '' TERM
-    sleep 30 &
-    sleep_pid=$!
-    printf '%s %s\n' "$$" "$sleep_pid" >"$JQ_PIDS_FILE"
-    wait "$sleep_pid"
+    printf '%s\n' "$$" >"$JQ_PID_FILE"
+    exec sleep 30
   fi
 fi
 exec "$REAL_JQ" "$@"
@@ -130,7 +140,8 @@ SH
     GET_COUNT_FILE="$tmp/$case_name-get-count" \
     ROLLBACK_STARTED_FILE="$tmp/$case_name-rollback-started" \
     REAL_JQ="$real_jq" \
-    JQ_PIDS_FILE="$tmp/$case_name-jq-pids" \
+    JQ_PID_FILE="$tmp/$case_name-jq-pid" \
+    KUBECTL_PID_FILE="$tmp/$case_name-kubectl-pid" \
     OLD_IMAGE="$old_image" DEPLOY_IMAGE="$deploy_image" TEST_FAILURE="$expected_failure" \
     "${run_deploy[@]}" "$deploy_script" "$manifest" "$deploy_sha" "$artifact_digest" "$deploy_image" \
       http://127.0.0.1:18080/ >"$output" 2>&1; then
@@ -147,19 +158,20 @@ SH
 
   if [[ "$expected_failure" == jq-* ]]; then
     grep -Fqx "jq:stall=$expected_failure" "$log" || fail "$case_name did not exercise the stalled filter"
-    local jq_pid sleep_pid pid process_state live_filter=false
-    read -r jq_pid sleep_pid <"$tmp/$case_name-jq-pids"
-    for pid in "$jq_pid" "$sleep_pid"; do
+    local jq_pid kubectl_pid pid process_state live_diagnostic=false
+    read -r jq_pid <"$tmp/$case_name-jq-pid"
+    read -r kubectl_pid <"$tmp/$case_name-kubectl-pid"
+    for pid in "$jq_pid" "$kubectl_pid"; do
       process_state="$(ps -o stat= -p "$pid" || true)"
       process_state="${process_state//[[:space:]]/}"
       if [[ -n "$process_state" && "$process_state" != Z* ]]; then
-        kill -KILL "$jq_pid" "$sleep_pid" 2>/dev/null || true
-        live_filter=true
+        kill -KILL "$jq_pid" "$kubectl_pid" 2>/dev/null || true
+        live_diagnostic=true
         break
       fi
     done
     [[ "$script_status" == 1 ]] || fail "$case_name did not bound the stalled JSON filter (exit $script_status)"
-    [[ "$live_filter" == false ]] || fail "$case_name left a stalled filter process running"
+    [[ "$live_diagnostic" == false ]] || fail "$case_name left a diagnostic process running"
   fi
 
   if [[ "$expected_failure" == rollout || "$expected_failure" == diagnostics || "$expected_failure" == events || "$expected_failure" == timeout || "$expected_failure" == jq-* ]]; then

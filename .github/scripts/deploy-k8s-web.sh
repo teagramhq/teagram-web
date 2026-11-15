@@ -114,12 +114,9 @@ deployment_started=true
 kubectl apply --filename "$manifest"
 if ! kubectl rollout status "deployment/$deployment" --namespace "$namespace" --timeout="$rollout_timeout"; then
   printf 'web deploy: collecting pod diagnostics before rollback\n' >&2
-  # Keep each pipeline supervisor alive until timeout can kill every stage.
-  if ! timeout --kill-after=1s 5s bash -o pipefail -c "
-    trap '' TERM
-    kubectl get pods --namespace \"\$1\" --selector app.kubernetes.io/name=teagram-web \
-      --output json --request-timeout=4s | jq -c \"\$2\"
-  " _ "$namespace" '
+  if ! timeout --kill-after=1s 5s kubectl get pods --namespace "$namespace" \
+    --selector app.kubernetes.io/name=teagram-web --output json --request-timeout=4s |
+    timeout --kill-after=1s 5s jq -c '
       def container_status: {
         name, ready, restartCount, waiting: .state.waiting,
         terminated: (.state.terminated | {reason, exitCode, signal}),
@@ -135,11 +132,9 @@ if ! kubectl rollout status "deployment/$deployment" --namespace "$namespace" --
     '; then
     printf 'web deploy: could not collect pod diagnostics\n' >&2
   fi
-  if ! timeout --kill-after=1s 5s bash -o pipefail -c "
-    trap '' TERM
-    kubectl get events --namespace \"\$1\" --field-selector involvedObject.kind=Pod \
-      --output json --request-timeout=4s | jq -c \"\$2\"
-  " _ "$namespace" '
+  if ! timeout --kill-after=1s 5s kubectl get events --namespace "$namespace" \
+    --field-selector involvedObject.kind=Pod --output json --request-timeout=4s |
+    timeout --kill-after=1s 5s jq -c '
       {events: [.items[] | select(.involvedObject.name | startswith("teagram-web-")) |
         {name: .involvedObject.name, reason, message, type, count,
           lastTimestamp: (.lastTimestamp // .eventTime // .metadata.creationTimestamp)}] |
