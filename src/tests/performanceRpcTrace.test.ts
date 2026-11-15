@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'vitest';
-import {buildWalkComparison, cachedDialogReconcileWindowMs, classifyAndRemoveLongTaskTrace, collectCachedDialogReconcileSummaries, collectCachedDialogReconciles, findLongTasksWithSignificantSpanWork, findLongTasksOverlappingWalkMirrors, mergeCachedDialogReconcilePhaseSnapshots, observeLongAnimationFrames, selectHistoryPathTasks, settleInterruptedCachedDialogReconciles, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileSummaries, validateNoWalkLongTasks, type PerformanceTaskAttribution} from '../../e2e/performanceRpcTrace';
+import {buildWalkComparison, cachedDialogReconcileWindowMs, classifyAndRemoveLongTaskTrace, collectCachedDialogReconcileSummaries, collectCachedDialogReconciles, findLongTasksWithSignificantSpanWork, findLongTasksOverlappingWalkMirrors, mergeCachedDialogReconcilePhaseSnapshots, observeLongAnimationFrames, rpcInvocationsInMeasurementWindow, selectHistoryPathTasks, settleInterruptedCachedDialogReconciles, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileSummaries, validateNoWalkLongTasks, type PerformanceTaskAttribution} from '../../e2e/performanceRpcTrace';
 import {PerformancePhaseTrace} from '../lib/appManagers/performanceTrace';
 
 const mirror = (startTimeMs: number, durationMs: number) => ({traceId: 'walk', startTimeMs, durationMs});
@@ -351,6 +351,34 @@ test('returns history-path task attribution for the performance artifact', () =>
 });
 
 describe('performance RPC trace summary', () => {
+  test('selects chat-open RPCs from mousedown through the visible bubble', () => {
+    const calls = [
+      {method: 'before mousedown', startedAtEpochMs: 1_079},
+      {method: 'on mousedown', startedAtEpochMs: 1_080},
+      {method: 'before click', startedAtEpochMs: 1_099},
+      {method: 'at bubble', startedAtEpochMs: 1_160},
+      {method: 'after bubble', startedAtEpochMs: 1_161}
+    ];
+    const boundary = {rpcStartedAtMs: 80, startedAtMs: 100, ms: 60};
+    expect(rpcInvocationsInMeasurementWindow(calls, 1_000, boundary).map((call) => call.method)).toEqual([
+      'on mousedown', 'before click', 'at bubble'
+    ]);
+    expect(rpcInvocationsInMeasurementWindow(calls, 1_000, {startedAtMs: 100, ms: 60}).map((call) => call.method)).toEqual([
+      'at bubble'
+    ]);
+  });
+
+  test('clips a pre-click RPC wait to the measured click window', () => {
+    const summary = summarizeRpcTrace([
+      {method: 'messages.getHistory', startedAtMs: -20, durationMs: 30, outcome: 'success'}
+    ], 60);
+    expect(summary.rpcWallMs).toBe(10);
+    expect(summary.nonRpcElapsedMs).toBe(50);
+    expect(summarizeRpcTrace([
+      {method: 'messages.getHistory', startedAtMs: -40, durationMs: 30, outcome: 'success'}
+    ], 60).rpcWallMs).toBe(0);
+  });
+
   test('counts RPC invocations in the elapsed window relative to its start', async() => {
     const trace = await import('../../e2e/performanceRpcTrace') as any;
     const result = trace.rpcInvocationsInWindow([

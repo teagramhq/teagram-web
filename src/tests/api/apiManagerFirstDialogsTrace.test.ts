@@ -68,6 +68,44 @@ test('history-only performance tracing records getHistory spans without other RP
   expect(trace.calls.map(({method, outcome}) => ({method, outcome}))).toEqual([{method: 'messages.getHistory', outcome: 'success'}]);
 });
 
+test('history traces distinguish peers without retaining request credentials', async() => {
+  vi.stubEnv('VITE_PERF_TRACE', '0');
+  vi.stubEnv('VITE_PERF_SEARCH_TRACE', '0');
+  vi.stubEnv('VITE_PERF_HISTORY_TRACE', '1');
+  vi.resetModules();
+  const {ApiManager} = await import('@appManagers/apiManager');
+  vi.spyOn(globalThis, 'setInterval').mockImplementation(() => 0 as any);
+  const manager = new ApiManager();
+  vi.spyOn(manager as any, 'invokeApiInternal').mockImplementation(() => Promise.resolve({}));
+
+  await manager.invokeApi('messages.getHistory' as any, {peer: {_: 'inputPeerUser', user_id: 2, access_hash: 'sensitive'}} as any);
+  await manager.invokeApi('messages.getHistory' as any, {peer: {_: 'inputPeerUser', user_id: 3, access_hash: 'sensitive'}} as any);
+
+  const trace = manager.getPerformanceRpcTrace();
+  expect(trace.calls).toMatchObject([
+    {method: 'messages.getHistory', historyPeer: 'user:2', outcome: 'success'},
+    {method: 'messages.getHistory', historyPeer: 'user:3', outcome: 'success'}
+  ]);
+  expect(JSON.stringify(trace)).not.toContain('sensitive');
+});
+
+test('full tracing records one peer-attributed history span per request', async() => {
+  vi.stubEnv('VITE_PERF_TRACE', '1');
+  vi.stubEnv('VITE_PERF_HISTORY_TRACE', '1');
+  vi.resetModules();
+  const {ApiManager} = await import('@appManagers/apiManager');
+  vi.spyOn(globalThis, 'setInterval').mockImplementation(() => 0 as any);
+  const manager = new ApiManager();
+  vi.spyOn(manager as any, 'invokeApiInternal').mockImplementation(() => Promise.resolve({}));
+
+  const request = manager.invokeApi('messages.getHistory' as any, {peer: {_: 'inputPeerUser', user_id: 2}} as any);
+  await manager.trackPerformanceRpcWait('messages.getHistory', request);
+
+  expect(manager.getPerformanceRpcTrace().calls).toMatchObject([
+    {method: 'messages.getHistory', historyPeer: 'user:2', outcome: 'success'}
+  ]);
+});
+
 test('does not record RPC activity when performance tracing is disabled', async() => {
   vi.stubEnv('VITE_PERF_TRACE', '0');
   vi.resetModules();

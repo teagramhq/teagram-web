@@ -82,7 +82,19 @@ The 100x cold chat-list measurement uses fresh contexts and starts at navigation
 so the cold-load budget includes the document fetch.
 Chat-open timing starts when the browser dispatches the chat-list row's click;
 the separate `preInteractionMs` field records the time before that event so
-browser-driver delay does not count against client response time.
+browser-driver delay does not count against client response time. The 100x
+chat-open RPC trace also captures calls from the row's preceding mousedown,
+when the app starts opening the chat. RPC durations are clipped to the click
+timing window when calculating the reported wait. The cold diagnostic requires
+a history RPC for the fixture peer, identified by peer type and ID without
+recording access hashes. Its report retains both windows and the complete RPC
+trace, including when the diagnostic fails. Zero-call server validation covers
+the full mousedown-to-bubble interaction window. Before the cold diagnostic,
+dialog prefetch is paused, in-flight requests for the fixture peer are drained,
+and its history cache is flushed; prefetch resumes after the sample is captured.
+For the warm 100x sample, all active dialog prefetches drain while the queue is
+paused before the trace reset. The queue resumes at the measured mousedown, so
+new prefetches are included in the interaction trace.
 
 ## Fixture credentials and runner threat model
 
@@ -100,3 +112,18 @@ database, TLS key, and RSA key inside the GitHub-hosted runner. The account
 authenticates only to that job's disposable server and PostgreSQL snapshot.
 These credentials do not grant access to a shared or production service. The
 runner and its local performance services are discarded when the job ends.
+
+The performance-only history probe records the peer kind and numeric ID,
+RPC method, timing and outcome. It does not record the access hash, request
+parameters, credentials, or message content. Peer IDs and timestamps can still
+link activity to an account, so these trace-enabled builds and reports must only
+be used with generated fixtures, never with real accounts or production data.
+During the run, code on the fixture page can read the in-memory trace. The
+performance report, server logs and A/A evidence are available to people who
+can read the repository's workflow logs or artifacts; the workflow retains its
+uploaded artifacts for 14 days. A/A evidence may also be stored in the
+repository's Actions cache under that cache's retention policy. Traces attached
+to a Multica issue are visible to that workspace's issue readers and follow
+the workspace's attachment retention policy, which this repository does not
+specify. The runner's local in-memory data and temporary files are discarded
+with the runner.

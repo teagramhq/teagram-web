@@ -1,5 +1,5 @@
 import {expect, test} from '@playwright/test';
-import {beginMeasurement, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList} from './performanceMeasurement';
+import {beginMeasurement, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList, waitForDialogHistoryPrefetches, waitForPartnerDialogHistoryPrefetch, withLockedDialogHistoryPrefetch} from './performanceMeasurement';
 import {createServer, type ServerResponse} from 'node:http';
 import * as bundleMeasurement from './performanceBundleBytes';
 import {LOTTIE_FRAME_BG_CSS, waitForFirstStickerFrame, waitUntilOnScreen} from './lottieFrameMeasurement';
@@ -116,18 +116,134 @@ test('starts the measured window when the browser dispatches the click', async({
   expect(measurement.started).toBe(measurement.clickAt);
 });
 
-test('starts when the peer row is replaced after arming the click', async({page}) => {
+test('records the mouse and click when the peer row is replaced after arming', async({page}) => {
   await page.setContent('<button class="chatlist-chat" data-peer-id="42">Open chat</button>');
   await page.evaluate(() => {
     (window as any).__teagramPerf = {started: performance.now()};
   });
   const row = page.locator('.chatlist-chat[data-peer-id="42"]');
-  await startMeasurementAtClick(row);
+  await startMeasurementAtClick(row, true);
   await row.evaluate((element) => element.replaceWith(element.cloneNode(true)));
   await page.locator('.chatlist-chat[data-peer-id="42"]').click();
 
-  const clickAt = await page.evaluate(() => (window as any).__teagramPerf.clickAt);
+  const {clickAt, rpcStartedAtMs} = await page.evaluate(() => (window as any).__teagramPerf);
   expect(Number.isFinite(clickAt)).toBe(true);
+  expect(Number.isFinite(rpcStartedAtMs)).toBe(true);
+  expect(rpcStartedAtMs).toBeLessThanOrEqual(clickAt);
+});
+
+test('includes history started by a chat row mousedown in the measurement window', async({page}) => {
+  await page.setContent('<button class="chatlist-chat" data-peer-id="42">Open chat</button><main class="bubbles"></main>');
+  await page.evaluate(() => {
+    (window as any).__teagramPerf = {started: performance.now()};
+    document.querySelector('.chatlist-chat')!.addEventListener('mousedown', () => {
+      (window as any).historyRequestAt = performance.now();
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      bubble.dataset.mid = '1';
+      bubble.dataset.peerId = '42';
+      bubble.style.cssText = 'display:block;width:10px;height:10px';
+      document.querySelector('.bubbles')!.append(bubble);
+    });
+  });
+  const row = page.locator('.chatlist-chat[data-peer-id="42"]');
+  await startMeasurementAtClick(row, true);
+  await row.hover();
+  await page.mouse.down();
+  await page.waitForTimeout(30);
+  await page.mouse.up();
+
+  const boundary = await waitForFirstVisibleBubble(page);
+  const historyRequestAt = await page.evaluate(() => (window as any).historyRequestAt as number);
+  expect(boundary.rpcStartedAtMs).toBeLessThanOrEqual(historyRequestAt);
+  expect(boundary.startedAtMs).toBeGreaterThan(historyRequestAt);
+  expect(boundary.startedAtMs + boundary.ms).toBeGreaterThanOrEqual(historyRequestAt);
+});
+
+test('waits for an in-flight prefetch belonging to a replaced fixture row', async({page}) => {
+  await page.setContent('<div id="chatlist-container"><div class="chatlist-chat" data-peer-id="42"></div></div>');
+  await page.evaluate(() => {
+    const row = document.querySelector('.chatlist-chat')!;
+    const detachedRow = row.cloneNode(true);
+    (window as any).appDialogsManager = {lazyLoadQueue: {queue: [{div: row}], inProcess: new Set([{div: detachedRow}])}};
+  });
+  let resolved = false;
+  const waiting = waitForPartnerDialogHistoryPrefetch(page, 42, false).then(() => { resolved = true; });
+  await page.waitForTimeout(100);
+  expect(resolved).toBe(false);
+  await page.evaluate(() => (window as any).appDialogsManager.lazyLoadQueue.inProcess.clear());
+  await waiting;
+  expect(resolved).toBe(true);
+});
+
+test('drains another peer before a warm open and releases queued prefetch on mousedown', async({page}) => {
+  await page.setContent('<button class="chatlist-chat" data-peer-id="42">Open chat</button>');
+  await page.evaluate(() => {
+    const queue = {
+      inProcess: new Set([{div: {dataset: {peerId: '7'}}}]),
+      lockPromise: null as Promise<void> | null,
+      lock() { this.lockPromise = Promise.resolve(); },
+      unlockAndRefresh() {
+        (window as any).prefetchUnlockCalls = ((window as any).prefetchUnlockCalls || 0) + 1;
+        if(this.lockPromise) (window as any).prefetchReleasedAt = performance.now();
+        this.lockPromise = null;
+      }
+    };
+    (window as any).appDialogsManager = {lazyLoadQueue: queue};
+    (window as any).__teagramPerf = {started: performance.now()};
+  });
+  const row = page.locator('.chatlist-chat[data-peer-id="42"]');
+  const opening = withLockedDialogHistoryPrefetch(page, async() => {
+    await waitForDialogHistoryPrefetches(page);
+    await startMeasurementAtClick(row, true, true);
+    await row.click();
+  });
+  await expect.poll(() => page.evaluate(() => !!(window as any).appDialogsManager.lazyLoadQueue.lockPromise)).toBe(true);
+  await page.waitForTimeout(100);
+  expect(await page.evaluate(() => Number.isFinite((window as any).__teagramPerf.rpcStartedAtMs))).toBe(false);
+  await page.evaluate(() => (window as any).appDialogsManager.lazyLoadQueue.inProcess.clear());
+  await opening;
+  const result = await page.evaluate(() => ({...((window as any).__teagramPerf), prefetchReleasedAt: (window as any).prefetchReleasedAt}));
+  expect(result.prefetchReleasedAtMouseDown).toBe(true);
+  expect(result.prefetchReleasedAt).toBeGreaterThanOrEqual(result.rpcStartedAtMs);
+  expect(result.prefetchReleasedAt).toBeLessThanOrEqual(result.clickAt);
+  expect(await page.evaluate(() => (window as any).prefetchUnlockCalls)).toBe(1);
+});
+
+test('unlocks dialog prefetch when a cold chat-open measurement fails', async({page}) => {
+  await page.evaluate(() => {
+    const queue = {
+      locked: false,
+      lockPromise: null as Promise<void> | null,
+      lock() { this.locked = true; this.lockPromise = Promise.resolve(); },
+      unlockAndRefresh() { this.locked = false; this.lockPromise = null; }
+    };
+    (window as any).appDialogsManager = {lazyLoadQueue: queue};
+  });
+  await expect(withLockedDialogHistoryPrefetch(page, async() => {
+    expect(await page.evaluate(() => (window as any).appDialogsManager.lazyLoadQueue.locked)).toBe(true);
+    throw new Error('measurement failed');
+  })).rejects.toThrow('measurement failed');
+  expect(await page.evaluate(() => (window as any).appDialogsManager.lazyLoadQueue.locked)).toBe(false);
+});
+
+test('fails when the dialog prefetch queue does not acquire its lock', async({page}) => {
+  await page.evaluate(() => {
+    (window as any).appDialogsManager = {lazyLoadQueue: {lock() {}, unlockAndRefresh() {}}};
+  });
+  await expect(withLockedDialogHistoryPrefetch(page, async() => {})).rejects.toThrow('chat-list history prefetch could not be locked');
+});
+
+test('keeps both the cold measurement and prefetch unlock errors', async({page}) => {
+  await page.evaluate(() => {
+    (window as any).appDialogsManager = {lazyLoadQueue: {
+      lockPromise: null as Promise<void> | null,
+      lock() { this.lockPromise = Promise.resolve(); },
+      unlockAndRefresh() { throw new Error('unlock failed'); }
+    }};
+  });
+  const error = await withLockedDialogHistoryPrefetch(page, async() => { throw new Error('measurement failed'); }).catch((failure) => failure);
+  expect(error.errors.map((failure: Error) => failure.message)).toEqual(['measurement failed', expect.stringContaining('unlock failed')]);
 });
 
 test('records the first visible bubble when it is mounted', async({page}) => {

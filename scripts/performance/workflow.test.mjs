@@ -9,6 +9,7 @@ import {PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS, SCENARIOS} from '.
 const workflow = readFileSync(new URL('../../.github/workflows/performance.yml', import.meta.url), 'utf8');
 const playwrightConfig = readFileSync(new URL('../../playwright.performance.config.ts', import.meta.url), 'utf8');
 const performanceScale = readFileSync(new URL('../../e2e/performanceScale.spec.ts', import.meta.url), 'utf8');
+const performanceMeasurement = readFileSync(new URL('../../e2e/performanceMeasurement.ts', import.meta.url), 'utf8');
 const performanceTrace = readFileSync(new URL('../../src/lib/appManagers/performanceTrace.ts', import.meta.url), 'utf8');
 const mainMessagePort = readFileSync(new URL('../../src/lib/mainWorker/mainMessagePort.ts', import.meta.url), 'utf8');
 const mainWorker = readFileSync(new URL('../../src/lib/mainWorker/index.worker.ts', import.meta.url), 'utf8');
@@ -87,6 +88,7 @@ function runSummaryWithArtifacts({
   const serverRpcClientCalls = Array.from({length: chatOpenServerClientHistoryCallCount}, (_, index) => ({
     callId: index + 1,
     method: 'messages.getHistory',
+    historyPeer: 'user:2',
     startedAtEpochMs: 1_762_800_000_000,
     durationMs: 60,
     outcome: 'success'
@@ -125,6 +127,7 @@ function runSummaryWithArtifacts({
     ...(key === 'chatOpen' && serverRpcRecords ? {serverRpcRecords} : {}),
     ...(key === 'chatOpen' ? {
       serverRpcGateWindow: {startEpochMs: 1_762_800_000_000, endEpochMs: 1_762_800_000_100},
+      serverRpcInteractionWindow: {startEpochMs: 1_762_799_999_990, endEpochMs: 1_762_800_000_100},
       rpcWallMs: includeChatOpenClientRpcData ? chatOpenRpcWallMs : null,
       nonRpcElapsedMs: includeChatOpenClientRpcData ? 100 - chatOpenRpcWallMs : null,
       serverRpcClientCalls,
@@ -182,7 +185,9 @@ function runSummaryWithArtifacts({
         rpcComparison: Object.fromEntries(['base', 'head'].map((variant) => [variant, {
           chatOpen: [{
             ms: 377,
+            serverRpcFixturePeer: 'user:2',
             serverRpcGateWindow: {startEpochMs: 1_762_800_000_000, endEpochMs: 1_762_800_000_377},
+            serverRpcInteractionWindow: {startEpochMs: 1_762_799_999_990, endEpochMs: 1_762_800_000_377},
             rpcCallCount: chatOpenClientHistoryCallCount,
             rpcWallMs: chatOpenClientHistoryCallCount ? 377 : 0,
             nonRpcElapsedMs: chatOpenClientHistoryCallCount ? 0 : 377,
@@ -224,7 +229,7 @@ function runSummaryWithArtifacts({
 test('timing bundles enable targeted search and history probes while keeping full profiles separate', () => {
   assert.match(performanceClientBuild, /^VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"\s*$/m);
   assert.match(performanceClientBuild, /^\s+\(cd "\$base_directory" && VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"\)\s*$/m);
-  assert.match(performanceClientBuild, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-trace-dist"/);
+  assert.match(performanceClientBuild, /VITE_PERF_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-trace-dist"/);
   assert.doesNotMatch(performanceClientBuild, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-(?:head|base)-dist"/);
 });
 
@@ -235,6 +240,8 @@ test('base search tracing preserves application RPC differences from the head bu
   assert.match(performanceClientBuild, /\(cd "\$base_directory" && VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"\)/);
 
   const baseApiManager = [
+    "import {PerformanceRpcTrace, performancePhaseTrace} from '@appManagers/performanceTrace';",
+    '',
     'export class ApiManager {',
     '  private performanceRpcTrace?: PerformanceRpcTrace;',
     '  constructor() {',
@@ -244,6 +251,11 @@ test('base search tracing preserves application RPC differences from the head bu
     '  }',
     '  public resetPerformanceRpcTrace(recordSpans = true) {',
     "    if(import.meta.env.VITE_PERF_TRACE === '1') this.performanceRpcTrace!.reset(recordSpans);",
+    '  }',
+    '  public trackPerformanceRpcWait(method, request) {',
+    "    return import.meta.env.VITE_PERF_TRACE === '1' ?",
+    '      this.performanceRpcTrace?.trackWait(method, request) ?? request :',
+    '      request;',
     '  }',
     '  public invokeApi(method, params = {}, options = {}) {',
     '    const methodName = String(method);',
@@ -289,6 +301,16 @@ test('base search tracing preserves application RPC differences from the head bu
       '      const request = this.invokeApiInternal(method, params, options);\n      return traceSearch ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;'
     );
   const instrumentedSearchAwareBase = injectSearchRpcTracer(searchAwareBase);
+  const priorHistoryBase = instrumentedBase
+    .replace("import {trackHistoryPerformanceRpc} from '@appManagers/performanceHistoryTrace';\n", '')
+    .replace(
+      '      return traceHistory ? trackHistoryPerformanceRpc(this.performanceRpcTrace, request, params) :\n        traceSearch ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;',
+      '      return traceSearch || traceHistory ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;'
+    )
+    .replace(
+      '      return traceHistory ? trackHistoryPerformanceRpc(this.performanceRpcTrace, request, params) : request;',
+      '      return traceHistory ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;'
+    );
 
   assert.match(instrumentedBase, /implementation: 'base RPC handling'/);
   assert.doesNotMatch(instrumentedBase, /head RPC handling/);
@@ -298,11 +320,12 @@ test('base search tracing preserves application RPC differences from the head bu
   assert.match(instrumentedHead, /VITE_PERF_SEARCH_TRACE/);
   assert.match(instrumentedBase, /VITE_PERF_HISTORY_TRACE/);
   assert.match(instrumentedBase, /messages\.getHistory/);
-  assert.match(instrumentedBase, /traceHistory \? this\.performanceRpcTrace\?\.trackWait/);
+  assert.match(instrumentedBase, /traceHistory \? trackHistoryPerformanceRpc/);
   assert.match(instrumentedHead, /VITE_PERF_HISTORY_TRACE/);
   assert.match(instrumentedSearchAwareBase, /VITE_PERF_HISTORY_TRACE/);
   assert.match(instrumentedSearchAwareBase, /const traceSearch =/);
-  assert.match(instrumentedSearchAwareBase, /return traceSearch \|\| traceHistory \?/);
+  assert.match(instrumentedSearchAwareBase, /return traceHistory \? trackHistoryPerformanceRpc/);
+  assert.equal(injectSearchRpcTracer(priorHistoryBase), instrumentedBase);
 });
 
 test('search RPC tracer injection accepts the current ApiManager unchanged and is repeatable', async() => {
@@ -319,7 +342,7 @@ test('search RPC tracer injection accepts the current ApiManager unchanged and i
 test('head worker registers the mirror queue barrier only in performance builds', () => {
   assert.match(mainWorker, /\.\.\.\(import\.meta\.env\.VITE_PERF_HISTORY_TRACE === '1' \|\| import\.meta\.env\.VITE_PERF_TRACE === '1' \? \{\s*mirrorQueueBarrier:/);
   assert.match(performanceClientBuild, /VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"/);
-  assert.match(performanceClientBuild, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-trace-dist"/);
+  assert.match(performanceClientBuild, /VITE_PERF_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-trace-dist"/);
 });
 
 test('mirror queue barrier injection accepts the current guarded worker listener idempotently', async() => {
@@ -522,7 +545,7 @@ test('same-head retries re-upload each attempt evidence as downloadable artifact
 test('performance tracing uses a separate diagnostic bundle', () => {
   assert.match(performanceClientBuild, /VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"/);
   assert.match(performanceClientBuild, /VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"/);
-  assert.match(performanceClientBuild, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-trace-dist"/);
+  assert.match(performanceClientBuild, /VITE_PERF_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-trace-dist"/);
   assert.match(performanceClientBuild, /PERF_TRACE_HEAD_ORIGIN_100X=http:\/\/localhost:4177/);
   assert.match(workflow, /TG_WEBSOCKET_ALLOWED_ORIGINS=.*http:\/\/localhost:4177/);
 });
@@ -733,6 +756,7 @@ test('summary only tolerates a server interval union larger than the client unio
       sample.serverRpcClientCalls = [{
         callId: 1,
         method: 'messages.getHistory',
+        historyPeer: 'user:2',
         startedAtEpochMs: startEpochMs + 10,
         durationMs: 60,
         outcome: 'success'
@@ -765,7 +789,7 @@ test('summary excludes correlated client and server work wholly after the chat-o
         sample.rpcWallMs = 0;
         sample.nonRpcElapsedMs = sample.ms;
         sample.rpcCalls = [];
-        sample.serverRpcClientCalls = [{callId: 1, method: 'messages.getHistory', startedAtEpochMs: gateEnd + 10, durationMs: 60, outcome: 'success'}];
+        sample.serverRpcClientCalls = [{callId: 1, method: 'messages.getHistory', historyPeer: 'user:2', startedAtEpochMs: gateEnd + 10, durationMs: 60, outcome: 'success'}];
         sample.serverRpcRecords = [{method: 'messages.getHistory', duration_us: 40_123, result: 'success', end_unix_ms: Math.round(gateEnd + 63)}];
       }
     }
@@ -789,7 +813,7 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   assert.ok(capture, 'the capture helper must be present');
   assert.match(capture, /captureRpcTrace/);
   assert.match(capture, /serverRpcGateWindow/);
-  assert.match(capture, /rpcInvocationsInWindow\(rpcRawCalls\.map\(\(call, callId\) => \(\{\.\.\.call, callId\}\)\)\.filter\(\(call\) => call\.method === 'messages\.getHistory'\), timeOrigin, boundary\.startedAtMs, boundary\.ms\)/, 'base bundles keep trace positions paired with start times without adding app trace call ids');
+  assert.match(capture, /rpcInvocationsInMeasurementWindow\(rpcRawCalls\.map\(\(call, callId\) => \(\{\.\.\.call, callId\}\)\)\.filter\(\(call\) => call\.method === 'messages\.getHistory' && typeof call\.historyPeer === 'string'\), timeOrigin, boundary\)/, 'base bundles keep trace positions paired with start times without adding app trace call ids');
   assert.doesNotMatch(performanceTrace, /callId/, 'the app trace must not grow a call id that base bundles lack');
   assert.ok(openPartnerChat, 'the chat-open helper must be present');
   assert.doesNotMatch(openPartnerChat, /waitForHistorySettled/);
@@ -799,7 +823,7 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   assert.match(attachServerRpcTrace, /serverRpcRecordsCoverClientCalls/);
   assert.match(attachServerRpcTrace, /readServerRpcTraceRecordsSince/);
   assert.match(attachServerRpcTrace, /if\(!clientCalls\.length\)/);
-  assert.match(attachServerRpcTrace, /zero-call gate has .*uncorrelated server messages\.getHistory records inside its gate window/);
+  assert.match(attachServerRpcTrace, /requireNoUncorrelatedHistoryRecords\(traceRecords, sample\.serverRpcInteractionWindow\)/);
   assert.match(attachServerRpcTrace, /\.filter\(\(record\) => serverRpcRecordMatchesClientCalls\(record, clientCalls\)\)/, 'all completed correlated handlers must be retained without polling for a quiet period');
   assert.doesNotMatch(attachServerRpcTrace, /quietMs|waitForServerRpcTraceRecords/);
   assert.ok(finalizeServerRpcTrace, 'the captured chat-open identities must settle before server records attach');
@@ -825,22 +849,22 @@ test('100x chat-open gate captures call identities at its boundary and settles o
 });
 
 test('cold chat-open preparation is restricted to the RPC diagnostic', () => {
-  const prepare = performanceScale.match(/async function prepareColdChatOpenStartState[\s\S]*?(?=\nfunction expectChatOpenHistoryCall)/)?.[0];
-  const waitForPrefetch = performanceScale.match(/async function waitForPartnerDialogHistoryPrefetch[\s\S]*?(?=\nasync function prepareColdChatOpenStartState)/)?.[0];
+  const prepare = performanceScale.match(/async function prepareColdChatOpenStartState[\s\S]*?(?=\nasync function finalizeServerRpcTrace)/)?.[0];
+  const waitForPrefetch = performanceMeasurement.match(/export async function waitForPartnerDialogHistoryPrefetch[\s\S]*?(?=\nexport async function waitForDialogHistoryPrefetches)/)?.[0];
   const openPartnerChat = performanceScale.match(/async function openPartnerChat\([\s\S]*?(?=\nasync function scrollBackTwoThousand)/)?.[0];
   const traceTargetScenarios = performanceScale.match(/async function traceTargetScenarios\([\s\S]*?(?=\ntest\('measures the scale fixture)/)?.[0];
 
   assert.ok(prepare, 'cold-history preparation should be isolated before the measured click');
   assert.ok(waitForPrefetch, 'the fixture row lazy-load must be drained before flushing its cache');
   assert.ok(openPartnerChat && traceTargetScenarios);
-  assert.match(prepare, /await waitForPartnerDialogHistoryPrefetch\(page, fixture\.partner\)/, 'finish any chat-list history prefetch before clearing the peer cache');
+  assert.match(prepare, /await waitForPartnerDialogHistoryPrefetch\(page, fixture\.partner, false\)/, 'finish in-flight chat-list history prefetch before clearing the peer cache');
   assert.match(prepare, /if\(appImManager\.chat\?\.peerId\) await appImManager\.setPeer\(\{\}\)/, 'close an active chat before re-opening the fixture peer');
   assert.match(prepare, /if\(appImManager\.chat\?\.peerId\) throw new Error/, 'fail if the active chat did not close');
   assert.match(prepare, /await expect\(page\.locator\(`\.bubbles \.bubble\[data-peer-id=/, 'do not start a gate while stale fixture bubbles remain visible');
   assert.ok(prepare.indexOf('waitForPartnerDialogHistoryPrefetch') < prepare.indexOf('flushStoragesByPeerId'), 'drain list prefetch before the cache is cleared');
   assert.match(waitForPrefetch, /queue\.queue/);
   assert.match(waitForPrefetch, /queue\.inProcess/);
-  assert.match(waitForPrefetch, /rows\.includes\(item\.div\)/, 'wait for pending loads on every visible fixture row');
+  assert.match(waitForPrefetch, /item\.div\?\.dataset\.peerId === String\(peerId\)/, 'wait for pending loads even if a fixture row was replaced');
   assert.match(prepare, /await \(window as any\)\.rootScope\.managers\.appMessagesManager\.flushStoragesByPeerId\(peerId\)/);
   assert.match(prepare, /await \(window as any\)\.apiManagerProxy\.invoke\('mirrorQueueBarrier', undefined\)/);
   assert.ok(prepare.indexOf('flushStoragesByPeerId') < prepare.indexOf("invoke('mirrorQueueBarrier'"), 'the worker acknowledgement must follow the cache deletion request');
@@ -850,16 +874,18 @@ test('cold chat-open preparation is restricted to the RPC diagnostic', () => {
   assert.match(mainWorker, /mirrorQueueBarrier:\s*\(\) => \{[\s\S]*?earlier worker-to-window mirror messages[\s\S]*?\}/);
   assert.doesNotMatch(openPartnerChat, /prepareColdChatOpenStartState|flushStoragesByPeerId/);
   assert.match(traceTargetScenarios, /await prepareColdChatOpenStartState\(page, fixture\)/);
+  assert.match(traceTargetScenarios, /withLockedDialogHistoryPrefetch\(page, async\(\) =>/);
   assert.ok(traceTargetScenarios.indexOf('prepareColdChatOpenStartState') < traceTargetScenarios.indexOf('startMeasurementAtClick'));
-  assert.ok(performanceScale.includes('expectChatOpenHistoryCall(chatOpenSample'), 'cold RPC diagnostics must still require an in-gate history call');
+  assert.ok(performanceScale.includes('requireFixtureHistoryCall(sample.serverRpcClientCalls, sample.serverRpcFixturePeer)'), 'cold RPC diagnostics must require the fixture peer history call');
 });
 
-test('ordinary 100x chat-open drains fixture preview-history prefetch before the gate', () => {
+test('ordinary 100x chat-open drains active dialog prefetches before the gate', () => {
   const openPartnerChat = performanceScale.match(/async function openPartnerChat\([\s\S]*?(?=\nasync function scrollBackTwoThousand)/)?.[0];
 
   assert.ok(openPartnerChat, 'the measured chat-open helper must be present');
-  assert.match(openPartnerChat, /if\(collectServerRpcTrace\) await waitForPartnerDialogHistoryPrefetch\(page, fixture\.partner\)/);
-  assert.ok(openPartnerChat.indexOf('waitForPartnerDialogHistoryPrefetch') < openPartnerChat.indexOf('await begin(page, requests, true, traceRpc)'), 'drain prior row prefetch before starting the measured interaction');
+  assert.match(openPartnerChat, /await waitForPartnerDialogHistoryPrefetch\(page, fixture\.partner\)/);
+  assert.match(openPartnerChat, /withLockedDialogHistoryPrefetch\(page, async\(\) => \{\s*await waitForDialogHistoryPrefetches\(page\);\s*return measure\(\)/);
+  assert.match(openPartnerChat, /startMeasurementAtClick\(row, collectServerRpcTrace, collectServerRpcTrace\)/);
   assert.doesNotMatch(openPartnerChat, /flushStoragesByPeerId/, 'preserve the warmed chat-open state');
 });
 
@@ -916,6 +942,30 @@ test('summary fails closed when a cold chat-open RPC diagnostic issued no getHis
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /cold 100x chatOpen RPC diagnostic base sample 1 has no client messages\.getHistory span/);
+});
+
+test('summary rejects a cold diagnostic with only another peer history request', () => {
+  const result = runSummaryWithArtifacts({
+    mutateReport(report) {
+      const sample = report.diagnostics['100x'].rpcComparison.base.chatOpen[0];
+      sample.serverRpcFixturePeer = 'user:2';
+      sample.serverRpcClientCalls = sample.serverRpcClientCalls.map((call) => ({...call, historyPeer: 'user:3'}));
+    }
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /cold 100x chatOpen RPC diagnostic base sample 1.*fixture.*messages\.getHistory/i);
+});
+
+test('summary fails closed when the chat-open RPC interaction window is missing', () => {
+  const result = runSummaryWithArtifacts({
+    mutateReport(report) {
+      delete report.variants.base['100x'].chatOpen[0].serverRpcInteractionWindow;
+    }
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /100x chatOpen gate sample base sample 1.*interaction window/);
 });
 
 test('summary fails closed when a zero-call sample attaches an uncorrelated process-wide handler', () => {
@@ -1008,6 +1058,7 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
     const withChatOpenTimings = (sample) => ({
       ...sample,
       serverRpcGateWindow: {startEpochMs: 1_762_800_000_000, endEpochMs: 1_762_800_000_000 + sample.ms},
+      serverRpcInteractionWindow: {startEpochMs: 1_762_799_999_990, endEpochMs: 1_762_800_000_000 + sample.ms},
       rpcWallMs: 60,
       nonRpcElapsedMs: sample.ms - 60,
       serverRpcClientCalls: [{callId: 1, method: 'messages.getHistory', startedAtEpochMs: 1_762_800_000_000, durationMs: 60, outcome: 'success'}],
@@ -1059,12 +1110,14 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
           rpcComparison: Object.fromEntries(['base', 'head'].map((variant) => [variant, {
             chatOpen: [{
               ms: 377,
+              serverRpcFixturePeer: 'user:2',
               serverRpcGateWindow: {startEpochMs: 1_762_800_000_000, endEpochMs: 1_762_800_000_377},
+              serverRpcInteractionWindow: {startEpochMs: 1_762_799_999_990, endEpochMs: 1_762_800_000_377},
               rpcCallCount: 1,
               rpcWallMs: 377,
               nonRpcElapsedMs: 0,
               rpcCalls: [{method: 'messages.getHistory', durationMs: 377, outcome: 'success'}],
-              serverRpcClientCalls: [{callId: 1, method: 'messages.getHistory', startedAtEpochMs: 1_762_800_000_000, durationMs: 377, outcome: 'success'}],
+              serverRpcClientCalls: [{callId: 1, method: 'messages.getHistory', historyPeer: 'user:2', startedAtEpochMs: 1_762_800_000_000, durationMs: 377, outcome: 'success'}],
               serverRpcRecords: [{method: 'messages.getHistory', duration_us: 40_123, result: 'success', end_unix_ms: 1_762_800_000_123}]
             }]
           }])),
