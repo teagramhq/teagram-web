@@ -12,6 +12,8 @@ expected_issue_description='Issue key to report this run to (e.g. MAIN-123). Lea
 private_artifact_workflow="${PRIVATE_ARTIFACT_WORKFLOW:-.github/workflows/private-artifact.yml}"
 repository_ci_workflow="${REPOSITORY_CI_WORKFLOW:-.github/workflows/ci.yml}"
 deployment_stack_workflow="${DEPLOYMENT_STACK_WORKFLOW:-.github/workflows/deployment-stack-checks.yml}"
+# Split the names so this contract does not itself contain an old route reference.
+legacy_routes=("tag:ci-""deploy" "teagram-k3s-""api")
 
 fail() {
   printf '%s: %s\n' "$workflow" "$1" >&2
@@ -486,7 +488,47 @@ check_kubeconfig_validation() (
   done
 )
 
+check_legacy_route_references() {
+  local directory status
+  for directory in "$@"; do
+    [[ -d "$directory" ]] || fail "legacy route scan directory is missing: $directory"
+    if grep -R -F -q -e "${legacy_routes[0]}" -e "${legacy_routes[1]}" -- "$directory"; then
+      fail "legacy route reference found in $directory"
+    else
+      status=$?
+      [[ "$status" == 1 ]] || fail "could not scan $directory for legacy route references"
+    fi
+  done
+}
+
+legacy_route_self_test() (
+  set -euo pipefail
+  local tmp directory route
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  cp -a .github "$tmp/.github"
+  mkdir -p "$tmp/.github/workflows/nested" "$tmp/.github/scripts/nested"
+  run_fixture_contract() (
+    cd "$tmp"
+    unset DEPLOY_WORKFLOW PRIVATE_ARTIFACT_WORKFLOW REPOSITORY_CI_WORKFLOW DEPLOYMENT_STACK_WORKFLOW SKIP_PUBLICATION_CALL_GRAPH
+    bash .github/scripts/test-deploy-workflow-contract.sh --contract-only
+  )
+  run_fixture_contract >"$tmp/scan.log" 2>&1 || fail 'clean legacy route fixture must pass the contract'
+  for directory in workflows scripts; do
+    for route in "${legacy_routes[@]}"; do
+      printf '%s\n' "$route" >"$tmp/.github/$directory/nested/probe"
+      if run_fixture_contract >"$tmp/scan.log" 2>&1; then
+        fail "legacy route self-test accepted a reference in $directory"
+      fi
+      grep -Fq "legacy route reference found in .github/$directory" "$tmp/scan.log" ||
+        fail "legacy route self-test failed for another reason in $directory"
+      : >"$tmp/.github/$directory/nested/probe"
+    done
+  done
+)
+
 check_contract() {
+  check_legacy_route_references .github/workflows .github/scripts
   if [[ "${SKIP_PUBLICATION_CALL_GRAPH:-false}" != true ]]; then
     check_publication_call_graph
   fi
@@ -664,6 +706,7 @@ self_test() {
 
 check_contract
 if [[ "${1:-}" != '--contract-only' ]]; then
+  legacy_route_self_test
   publication_call_graph_self_test
   self_test
   printf 'deploy workflow contract holds\n'
