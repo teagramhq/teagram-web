@@ -850,7 +850,7 @@ test('100x chat-open gate captures call identities at its boundary and settles o
 
 test('cold chat-open preparation is restricted to the RPC diagnostic', () => {
   const prepare = performanceScale.match(/async function prepareColdChatOpenStartState[\s\S]*?(?=\nasync function finalizeServerRpcTrace)/)?.[0];
-  const waitForPrefetch = performanceMeasurement.match(/export async function waitForPartnerDialogHistoryPrefetch[\s\S]*?(?=\nexport async function withLockedDialogHistoryPrefetch)/)?.[0];
+  const waitForPrefetch = performanceMeasurement.match(/export async function waitForPartnerDialogHistoryPrefetch[\s\S]*?(?=\nexport async function waitForDialogHistoryPrefetches)/)?.[0];
   const openPartnerChat = performanceScale.match(/async function openPartnerChat\([\s\S]*?(?=\nasync function scrollBackTwoThousand)/)?.[0];
   const traceTargetScenarios = performanceScale.match(/async function traceTargetScenarios\([\s\S]*?(?=\ntest\('measures the scale fixture)/)?.[0];
 
@@ -879,12 +879,13 @@ test('cold chat-open preparation is restricted to the RPC diagnostic', () => {
   assert.ok(performanceScale.includes('requireFixtureHistoryCall(sample.serverRpcClientCalls, sample.serverRpcFixturePeer)'), 'cold RPC diagnostics must require the fixture peer history call');
 });
 
-test('ordinary 100x chat-open drains fixture preview-history prefetch before the gate', () => {
+test('ordinary 100x chat-open drains active dialog prefetches before the gate', () => {
   const openPartnerChat = performanceScale.match(/async function openPartnerChat\([\s\S]*?(?=\nasync function scrollBackTwoThousand)/)?.[0];
 
   assert.ok(openPartnerChat, 'the measured chat-open helper must be present');
-  assert.match(openPartnerChat, /if\(collectServerRpcTrace\) await waitForPartnerDialogHistoryPrefetch\(page, fixture\.partner\)/);
-  assert.ok(openPartnerChat.indexOf('waitForPartnerDialogHistoryPrefetch') < openPartnerChat.indexOf('await begin(page, requests, true, traceRpc)'), 'drain prior row prefetch before starting the measured interaction');
+  assert.match(openPartnerChat, /await waitForPartnerDialogHistoryPrefetch\(page, fixture\.partner\)/);
+  assert.match(openPartnerChat, /withLockedDialogHistoryPrefetch\(page, async\(\) => \{\s*await waitForDialogHistoryPrefetches\(page\);\s*return measure\(\)/);
+  assert.match(openPartnerChat, /startMeasurementAtClick\(row, collectServerRpcTrace, collectServerRpcTrace\)/);
   assert.doesNotMatch(openPartnerChat, /flushStoragesByPeerId/, 'preserve the warmed chat-open state');
 });
 

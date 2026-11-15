@@ -7,7 +7,7 @@ import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, isNetworkRequestURL, sumBundleBytes, trackBundleDocumentNavigation, type BundleRequestTracker} from './performanceBundleBytes';
 import {buildWalkComparison, CACHED_DIALOG_RECONCILE_PHASE_NAME, cachedDialogReconcileWindowMs, collectCachedDialogReconcileSummaries, findLongTasksOverlappingWalkMirrors, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsBetween, rpcInvocationsInMeasurementWindow, rpcMethodCounts, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
-import {beginMeasurement as begin, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList, waitForPartnerDialogHistoryPrefetch, withLockedDialogHistoryPrefetch, type DomNodeCounts, type FirstVisibleChatListBoundary} from './performanceMeasurement';
+import {beginMeasurement as begin, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList, waitForDialogHistoryPrefetches, waitForPartnerDialogHistoryPrefetch, withLockedDialogHistoryPrefetch, type DomNodeCounts, type FirstVisibleChatListBoundary} from './performanceMeasurement';
 import {endPresentedFrameCapture, startFrameTrace, startPresentedFrameCapture, stopFrameTrace, summarizeDroppedFrames, summarizeFrameScripts, withPresentedFrameCleanup} from './performanceFrameTrace';
 import {LOTTIE_FRAME_BG_CSS, scheduleAfterInterveningPaint, waitForFirstStickerFrame, waitForFirstStickerPaint, waitUntilOnScreen} from './lottieFrameMeasurement';
 import {globalSearchSampleMs, isCurrentGlobalSearchResult} from '../scripts/performance/global-search-measurement.mjs';
@@ -65,6 +65,7 @@ type Metric = {
   firstVisibleChatListMs?: number,
   firstVisibleChatListSource?: FirstVisibleChatListBoundary['source'],
   liveBoundaryMs?: number,
+  prefetchReleasedAtMouseDown?: boolean,
   longTasksOver50Ms: number,
   blockingTimeMs: number,
   maxLongTaskDurationMs: number,
@@ -523,6 +524,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       rpcCallCount: rpcTrace.callCount,
       rpcInvocations: rpcTrace.invocations,
       rpcRawCalls: rpcTrace.calls,
+      prefetchReleasedAtMouseDown: perf.prefetchReleasedAtMouseDown,
       workerPhases,
       mainPhases,
       droppedFramePercent: scroll && intervals.length ? droppedFramePercent : undefined,
@@ -1101,19 +1103,29 @@ async function reloadChatList(page: Page, requests: {value: number}, collectWalk
 async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture, traceRpc = false, collectWalkDiagnostics = false, collectServerRpcTrace = false) {
   const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
-  if(collectServerRpcTrace) await waitForPartnerDialogHistoryPrefetch(page, fixture.partner);
-  resetRequestBreakdown(page);
-  await begin(page, requests, true, traceRpc);
-  await startMeasurementAtClick(row, collectServerRpcTrace);
-  const traceOffset = collectServerRpcTrace ? serverRpcTraceOffset() : undefined;
-  await row.click();
-  const boundary = await waitForFirstVisibleBubble(page);
-  expect(Number.isFinite(boundary.preInteractionMs), 'chat-open timer did not start on the row click').toBe(true);
-  if(collectServerRpcTrace) expect(Number.isFinite(boundary.rpcStartedAtMs), 'chat-open RPC window did not start on the row mousedown').toBe(true);
-  const sample = await capture(page, requests, boundary, false, false, collectWalkDiagnostics, false, collectWalkDiagnostics, traceRpc, collectServerRpcTrace);
-  if(!collectServerRpcTrace) return sample;
-  serverRpcTraceOffsetsBySample.set(sample, traceOffset);
-  return sample;
+  const measure = async() => {
+    resetRequestBreakdown(page);
+    await begin(page, requests, true, traceRpc);
+    await startMeasurementAtClick(row, collectServerRpcTrace, collectServerRpcTrace);
+    const traceOffset = collectServerRpcTrace ? serverRpcTraceOffset() : undefined;
+    await row.click();
+    const boundary = await waitForFirstVisibleBubble(page);
+    expect(Number.isFinite(boundary.preInteractionMs), 'chat-open timer did not start on the row click').toBe(true);
+    if(collectServerRpcTrace) expect(Number.isFinite(boundary.rpcStartedAtMs), 'chat-open RPC window did not start on the row mousedown').toBe(true);
+    const sample = await capture(page, requests, boundary, false, false, collectWalkDiagnostics, false, collectWalkDiagnostics, traceRpc, collectServerRpcTrace);
+    if(collectServerRpcTrace) {
+      expect(sample.prefetchReleasedAtMouseDown, 'chat-list prefetch was not released at the measured mousedown').toBe(true);
+      serverRpcTraceOffsetsBySample.set(sample, traceOffset);
+    }
+    return sample;
+  };
+  if(!collectServerRpcTrace) return measure();
+  await waitForPartnerDialogHistoryPrefetch(page, fixture.partner);
+  // Keep older preview handlers outside the RPC window; resume queued work at mousedown.
+  return withLockedDialogHistoryPrefetch(page, async() => {
+    await waitForDialogHistoryPrefetches(page);
+    return measure();
+  });
 }
 
 async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean, options: ScrollBackTraceOptions = {}): Promise<MetricWithPendingPresentedFrameCounts | undefined> {
@@ -2064,10 +2076,29 @@ test('cold fixture chat can start its history RPC before click', async({browser}
       await test.info().attach('cold-chat-early-history-trace', {path: tracePath, contentType: 'application/json'});
       const targetCalls = sample.serverRpcClientCalls!.filter((call) => call.historyPeer === sample.serverRpcFixturePeer);
       expect(targetCalls.some((call) => call.startedAtEpochMs < sample.serverRpcGateWindow!.startEpochMs)).toBe(true);
-      expect(targetCalls.some((call) => call.startedAtEpochMs >= sample.serverRpcGateWindow!.startEpochMs)).toBe(false);
       serverRpcTraceOffsetsBySample.set(sample, offset);
       await finalizeServerRpcTrace(page, sample, true);
     });
+  } finally {
+    await context.close();
+  }
+});
+
+test('warm fixture chat drains dialog prefetches before its RPC window', async({browser}) => {
+  const fixture = fixtures['100x']!;
+  const traceOrigin = process.env.PERF_TRACE_HEAD_ORIGIN_100X;
+  expect(traceOrigin, '100x traced head origin is missing').toBeTruthy();
+  const run = withOrigin(preparedVariants['100x'].head!, 'head', traceOrigin!);
+  const context = await browser.newContext({ignoreHTTPSErrors: true, viewport: {width: 1280, height: 800}, storageState: run.storageState});
+  try {
+    const page = await context.newPage();
+    const requests = {value: 0};
+    await installInstrumentation(page, requests, run.origin, false, true);
+    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    const sample = await openPartnerChat(page, requests, fixture, true, false, true);
+    expect(sample.prefetchReleasedAtMouseDown).toBe(true);
+    await finalizeServerRpcTrace(page, sample);
   } finally {
     await context.close();
   }

@@ -1,5 +1,5 @@
 import {expect, test} from '@playwright/test';
-import {beginMeasurement, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList, waitForPartnerDialogHistoryPrefetch, withLockedDialogHistoryPrefetch} from './performanceMeasurement';
+import {beginMeasurement, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList, waitForDialogHistoryPrefetches, waitForPartnerDialogHistoryPrefetch, withLockedDialogHistoryPrefetch} from './performanceMeasurement';
 import {createServer, type ServerResponse} from 'node:http';
 import * as bundleMeasurement from './performanceBundleBytes';
 import {LOTTIE_FRAME_BG_CSS, waitForFirstStickerFrame, waitUntilOnScreen} from './lottieFrameMeasurement';
@@ -176,12 +176,47 @@ test('waits for an in-flight prefetch belonging to a replaced fixture row', asyn
   expect(resolved).toBe(true);
 });
 
+test('drains another peer before a warm open and releases queued prefetch on mousedown', async({page}) => {
+  await page.setContent('<button class="chatlist-chat" data-peer-id="42">Open chat</button>');
+  await page.evaluate(() => {
+    const queue = {
+      inProcess: new Set([{div: {dataset: {peerId: '7'}}}]),
+      lockPromise: null as Promise<void> | null,
+      lock() { this.lockPromise = Promise.resolve(); },
+      unlockAndRefresh() {
+        (window as any).prefetchUnlockCalls = ((window as any).prefetchUnlockCalls || 0) + 1;
+        if(this.lockPromise) (window as any).prefetchReleasedAt = performance.now();
+        this.lockPromise = null;
+      }
+    };
+    (window as any).appDialogsManager = {lazyLoadQueue: queue};
+    (window as any).__teagramPerf = {started: performance.now()};
+  });
+  const row = page.locator('.chatlist-chat[data-peer-id="42"]');
+  const opening = withLockedDialogHistoryPrefetch(page, async() => {
+    await waitForDialogHistoryPrefetches(page);
+    await startMeasurementAtClick(row, true, true);
+    await row.click();
+  });
+  await expect.poll(() => page.evaluate(() => !!(window as any).appDialogsManager.lazyLoadQueue.lockPromise)).toBe(true);
+  await page.waitForTimeout(100);
+  expect(await page.evaluate(() => Number.isFinite((window as any).__teagramPerf.rpcStartedAtMs))).toBe(false);
+  await page.evaluate(() => (window as any).appDialogsManager.lazyLoadQueue.inProcess.clear());
+  await opening;
+  const result = await page.evaluate(() => ({...((window as any).__teagramPerf), prefetchReleasedAt: (window as any).prefetchReleasedAt}));
+  expect(result.prefetchReleasedAtMouseDown).toBe(true);
+  expect(result.prefetchReleasedAt).toBeGreaterThanOrEqual(result.rpcStartedAtMs);
+  expect(result.prefetchReleasedAt).toBeLessThanOrEqual(result.clickAt);
+  expect(await page.evaluate(() => (window as any).prefetchUnlockCalls)).toBe(1);
+});
+
 test('unlocks dialog prefetch when a cold chat-open measurement fails', async({page}) => {
   await page.evaluate(() => {
     const queue = {
       locked: false,
-      lock() { this.locked = true; },
-      unlockAndRefresh() { this.locked = false; }
+      lockPromise: null as Promise<void> | null,
+      lock() { this.locked = true; this.lockPromise = Promise.resolve(); },
+      unlockAndRefresh() { this.locked = false; this.lockPromise = null; }
     };
     (window as any).appDialogsManager = {lazyLoadQueue: queue};
   });
@@ -192,10 +227,18 @@ test('unlocks dialog prefetch when a cold chat-open measurement fails', async({p
   expect(await page.evaluate(() => (window as any).appDialogsManager.lazyLoadQueue.locked)).toBe(false);
 });
 
+test('fails when the dialog prefetch queue does not acquire its lock', async({page}) => {
+  await page.evaluate(() => {
+    (window as any).appDialogsManager = {lazyLoadQueue: {lock() {}, unlockAndRefresh() {}}};
+  });
+  await expect(withLockedDialogHistoryPrefetch(page, async() => {})).rejects.toThrow('chat-list history prefetch could not be locked');
+});
+
 test('keeps both the cold measurement and prefetch unlock errors', async({page}) => {
   await page.evaluate(() => {
     (window as any).appDialogsManager = {lazyLoadQueue: {
-      lock() {},
+      lockPromise: null as Promise<void> | null,
+      lock() { this.lockPromise = Promise.resolve(); },
       unlockAndRefresh() { throw new Error('unlock failed'); }
     }};
   });

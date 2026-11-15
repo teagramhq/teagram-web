@@ -129,6 +129,16 @@ export async function waitForPartnerDialogHistoryPrefetch(page: Page, peerId: nu
   }, {peerId, includeQueued}, {timeout: 60_000, polling: 20});
 }
 
+export async function waitForDialogHistoryPrefetches(page: Page) {
+  await page.waitForFunction(() => {
+    const queue = (window as any).appDialogsManager?.lazyLoadQueue;
+    if(!queue?.lockPromise || !(queue.inProcess instanceof Set)) {
+      throw new Error('chat-list history lazy-load queue must be locked while draining prefetches');
+    }
+    return queue.inProcess.size === 0;
+  }, undefined, {timeout: 60_000, polling: 20});
+}
+
 export async function withLockedDialogHistoryPrefetch<T>(page: Page, action: () => Promise<T>): Promise<T> {
   await page.evaluate(() => {
     const queue = (window as any).appDialogsManager?.lazyLoadQueue;
@@ -136,6 +146,7 @@ export async function withLockedDialogHistoryPrefetch<T>(page: Page, action: () 
       throw new Error('chat-list history lazy-load queue cannot be locked');
     }
     queue.lock();
+    if(!queue.lockPromise) throw new Error('chat-list history prefetch could not be locked');
   });
   let actionFailed = false;
   let actionError: unknown;
@@ -147,27 +158,36 @@ export async function withLockedDialogHistoryPrefetch<T>(page: Page, action: () 
     throw error;
   } finally {
     try {
-      await page.evaluate(() => (window as any).appDialogsManager.lazyLoadQueue.unlockAndRefresh());
+      await page.evaluate(() => {
+        const queue = (window as any).appDialogsManager.lazyLoadQueue;
+        if(queue.lockPromise) queue.unlockAndRefresh();
+      });
     } catch(error) {
-      if(actionFailed) throw Object.assign(new Error('cold chat-open and prefetch cleanup failed'), {errors: [actionError, error]});
+      if(actionFailed) throw Object.assign(new Error('chat-open and prefetch cleanup failed'), {errors: [actionError, error]});
       throw error;
     }
   }
 }
 
-export async function startMeasurementAtClick(target: Locator, captureMouseDown = false) {
-  await target.evaluate((element, captureMouseDown) => {
+export async function startMeasurementAtClick(target: Locator, captureMouseDown = false, releasePrefetchAtMouseDown = false) {
+  await target.evaluate((element, {captureMouseDown, releasePrefetchAtMouseDown}) => {
+    const queue = (window as any).appDialogsManager?.lazyLoadQueue;
+    if(releasePrefetchAtMouseDown && (!captureMouseDown || !queue?.lockPromise || typeof queue.unlockAndRefresh !== 'function')) {
+      throw new Error('chat-list history prefetch must be locked before arming its mousedown release');
+    }
     const perf = (window as any).__teagramPerf as {
       started: number,
       preInteractionMs?: number,
       clickAt?: number,
       rpcStartedAtMs?: number,
+      prefetchReleasedAtMouseDown?: boolean,
       peerId?: string,
       firstBubbleBoundary?: FirstBubbleBoundary
     };
     const armedAt = performance.now();
     perf.peerId = (element as HTMLElement).dataset.peerId;
     perf.rpcStartedAtMs = undefined;
+    perf.prefetchReleasedAtMouseDown = false;
     const matchesTarget = (event: MouseEvent) => {
       const peerRow = event.composedPath().find((target) =>
         target instanceof HTMLElement && target.classList.contains('chatlist-chat')
@@ -178,6 +198,10 @@ export async function startMeasurementAtClick(target: Locator, captureMouseDown 
       if(event.button !== 0 || !matchesTarget(event)) return;
       perf.rpcStartedAtMs = performance.now();
       document.removeEventListener('mousedown', onMouseDown, true);
+      if(releasePrefetchAtMouseDown && (window as any).appDialogsManager?.lazyLoadQueue === queue && queue.lockPromise) {
+        queue.unlockAndRefresh();
+        perf.prefetchReleasedAtMouseDown = true;
+      }
     };
     const onClick = (event: MouseEvent) => {
       if(!matchesTarget(event)) return;
@@ -191,7 +215,7 @@ export async function startMeasurementAtClick(target: Locator, captureMouseDown 
     };
     if(captureMouseDown) document.addEventListener('mousedown', onMouseDown, true);
     document.addEventListener('click', onClick, true);
-  }, captureMouseDown);
+  }, {captureMouseDown, releasePrefetchAtMouseDown});
 }
 
 export async function waitForFirstVisibleBubble(page: Page) {
