@@ -23,6 +23,27 @@ export function serverRpcTraceExpectation(clientRpcCount) {
 
 export const SERVER_RPC_TRACE_CLOCK_TOLERANCE_MS = 5;
 
+export function hasFixtureHistoryCall(calls, fixturePeer) {
+  return typeof fixturePeer === 'string' && /^user:[1-9]\d*$/.test(fixturePeer) && Array.isArray(calls) &&
+    calls.some((call) => call?.method === 'messages.getHistory' && call.historyPeer === fixturePeer);
+}
+
+export function requireFixtureHistoryCall(calls, fixturePeer) {
+  if(!hasFixtureHistoryCall(calls, fixturePeer)) {
+    throw new Error(`cold chat-open has no fixture ${fixturePeer} messages.getHistory span`);
+  }
+}
+
+export function requireNoUncorrelatedHistoryRecords(records, window) {
+  validateIntervalWindow(window);
+  const overlapping = records.filter((record) => record.method === 'messages.getHistory' &&
+    record.end_unix_ms >= window.startEpochMs &&
+    record.end_unix_ms - record.duration_us / 1000 <= window.endEpochMs);
+  if(overlapping.length) {
+    throw new Error(`100x chat-open zero-call gate has ${overlapping.length} uncorrelated server messages.getHistory records inside its interaction window`);
+  }
+}
+
 export function serverRpcClientCallsAreSettled(calls) {
   return Array.isArray(calls) && calls.every((call) => (
     Number.isSafeInteger(call?.callId) && call.callId >= 0 &&

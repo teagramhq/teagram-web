@@ -85,7 +85,13 @@ the separate `preInteractionMs` field records the time before that event so
 browser-driver delay does not count against client response time. The 100x
 chat-open RPC trace also captures calls from the row's preceding mousedown,
 when the app starts opening the chat. RPC durations are clipped to the click
-timing window when calculating the reported wait.
+timing window when calculating the reported wait. The cold diagnostic requires
+a history RPC for the fixture peer, identified by peer type and ID without
+recording access hashes. Its report retains both windows and the complete RPC
+trace, including when the diagnostic fails. Zero-call server validation covers
+the full mousedown-to-bubble interaction window. Before the cold diagnostic,
+dialog prefetch is paused, in-flight requests for the fixture peer are drained,
+and its history cache is flushed; prefetch resumes after the sample is captured.
 
 ## Fixture credentials and runner threat model
 

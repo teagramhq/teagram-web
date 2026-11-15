@@ -1,5 +1,5 @@
 import {expect, test} from '@playwright/test';
-import {beginMeasurement, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList} from './performanceMeasurement';
+import {beginMeasurement, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList, waitForPartnerDialogHistoryPrefetch, withLockedDialogHistoryPrefetch} from './performanceMeasurement';
 import {createServer, type ServerResponse} from 'node:http';
 import * as bundleMeasurement from './performanceBundleBytes';
 import {LOTTIE_FRAME_BG_CSS, waitForFirstStickerFrame, waitUntilOnScreen} from './lottieFrameMeasurement';
@@ -158,6 +158,49 @@ test('includes history started by a chat row mousedown in the measurement window
   expect(boundary.rpcStartedAtMs).toBeLessThanOrEqual(historyRequestAt);
   expect(boundary.startedAtMs).toBeGreaterThan(historyRequestAt);
   expect(boundary.startedAtMs + boundary.ms).toBeGreaterThanOrEqual(historyRequestAt);
+});
+
+test('waits for an in-flight prefetch belonging to a replaced fixture row', async({page}) => {
+  await page.setContent('<div id="chatlist-container"><div class="chatlist-chat" data-peer-id="42"></div></div>');
+  await page.evaluate(() => {
+    const row = document.querySelector('.chatlist-chat')!;
+    const detachedRow = row.cloneNode(true);
+    (window as any).appDialogsManager = {lazyLoadQueue: {queue: [{div: row}], inProcess: new Set([{div: detachedRow}])}};
+  });
+  let resolved = false;
+  const waiting = waitForPartnerDialogHistoryPrefetch(page, 42, false).then(() => { resolved = true; });
+  await page.waitForTimeout(100);
+  expect(resolved).toBe(false);
+  await page.evaluate(() => (window as any).appDialogsManager.lazyLoadQueue.inProcess.clear());
+  await waiting;
+  expect(resolved).toBe(true);
+});
+
+test('unlocks dialog prefetch when a cold chat-open measurement fails', async({page}) => {
+  await page.evaluate(() => {
+    const queue = {
+      locked: false,
+      lock() { this.locked = true; },
+      unlockAndRefresh() { this.locked = false; }
+    };
+    (window as any).appDialogsManager = {lazyLoadQueue: queue};
+  });
+  await expect(withLockedDialogHistoryPrefetch(page, async() => {
+    expect(await page.evaluate(() => (window as any).appDialogsManager.lazyLoadQueue.locked)).toBe(true);
+    throw new Error('measurement failed');
+  })).rejects.toThrow('measurement failed');
+  expect(await page.evaluate(() => (window as any).appDialogsManager.lazyLoadQueue.locked)).toBe(false);
+});
+
+test('keeps both the cold measurement and prefetch unlock errors', async({page}) => {
+  await page.evaluate(() => {
+    (window as any).appDialogsManager = {lazyLoadQueue: {
+      lock() {},
+      unlockAndRefresh() { throw new Error('unlock failed'); }
+    }};
+  });
+  const error = await withLockedDialogHistoryPrefetch(page, async() => { throw new Error('measurement failed'); }).catch((failure) => failure);
+  expect(error.errors.map((failure: Error) => failure.message)).toEqual(['measurement failed', expect.stringContaining('unlock failed')]);
 });
 
 test('records the first visible bubble when it is mounted', async({page}) => {

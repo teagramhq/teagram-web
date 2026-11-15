@@ -116,6 +116,45 @@ export async function beginMeasurement(page: Page, requests: {value: number}, re
   }, {recordSpans: recordRpcSpans, traceEnabled, captureWorkerMessages});
 }
 
+export async function waitForPartnerDialogHistoryPrefetch(page: Page, peerId: number, includeQueued = true) {
+  await page.waitForFunction(({peerId, includeQueued}) => {
+    const queue = (window as any).appDialogsManager?.lazyLoadQueue;
+    if(!Array.isArray(queue?.queue) || !(queue?.inProcess instanceof Set)) {
+      throw new Error('chat-list history lazy-load queue is unavailable');
+    }
+    const rows = [...document.querySelectorAll<HTMLElement>(`#chatlist-container .chatlist-chat[data-peer-id="${peerId}"]`)];
+    if(!rows.length) throw new Error(`fixture peer ${peerId} has no chat-list row before the cold history flush`);
+    // An in-flight item can outlive its row when dialog reconciliation replaces the DOM node.
+    return ![...(includeQueued ? queue.queue : []), ...queue.inProcess].some((item) => item.div?.dataset.peerId === String(peerId));
+  }, {peerId, includeQueued}, {timeout: 60_000, polling: 20});
+}
+
+export async function withLockedDialogHistoryPrefetch<T>(page: Page, action: () => Promise<T>): Promise<T> {
+  await page.evaluate(() => {
+    const queue = (window as any).appDialogsManager?.lazyLoadQueue;
+    if(typeof queue?.lock !== 'function' || typeof queue?.unlockAndRefresh !== 'function') {
+      throw new Error('chat-list history lazy-load queue cannot be locked');
+    }
+    queue.lock();
+  });
+  let actionFailed = false;
+  let actionError: unknown;
+  try {
+    return await action();
+  } catch(error) {
+    actionFailed = true;
+    actionError = error;
+    throw error;
+  } finally {
+    try {
+      await page.evaluate(() => (window as any).appDialogsManager.lazyLoadQueue.unlockAndRefresh());
+    } catch(error) {
+      if(actionFailed) throw Object.assign(new Error('cold chat-open and prefetch cleanup failed'), {errors: [actionError, error]});
+      throw error;
+    }
+  }
+}
+
 export async function startMeasurementAtClick(target: Locator, captureMouseDown = false) {
   await target.evaluate((element, captureMouseDown) => {
     const perf = (window as any).__teagramPerf as {

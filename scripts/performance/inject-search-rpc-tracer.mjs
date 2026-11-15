@@ -38,6 +38,11 @@ function countOccurrences(source, needle) {
 
 const replacements = [
   {
+    before: ["import {PerformanceRpcTrace, performancePhaseTrace} from '@appManagers/performanceTrace';\n\n"],
+    after: "import {PerformanceRpcTrace, performancePhaseTrace} from '@appManagers/performanceTrace';\nimport {trackHistoryPerformanceRpc} from '@appManagers/performanceHistoryTrace';\n\n",
+    description: 'the history trace import'
+  },
+  {
     before: [
       '    if(import.meta.env.VITE_PERF_TRACE === \'1\') {\n      this.performanceRpcTrace = new PerformanceRpcTrace(true);\n    }',
       '    if(import.meta.env.VITE_PERF_TRACE === \'1\' || import.meta.env.VITE_PERF_SEARCH_TRACE === \'1\') {\n      this.performanceRpcTrace = new PerformanceRpcTrace(true);\n    }'
@@ -54,6 +59,11 @@ const replacements = [
     description: 'the RPC trace reset'
   },
   {
+    before: ["    return import.meta.env.VITE_PERF_TRACE === '1' ?\n      this.performanceRpcTrace?.trackWait(method, request) ?? request :\n      request;"],
+    after: "    const traceHistory = import.meta.env.VITE_PERF_HISTORY_TRACE === '1' && method === 'messages.getHistory';\n    return import.meta.env.VITE_PERF_TRACE === '1' && !traceHistory ?\n      this.performanceRpcTrace?.trackWait(method, request) ?? request :\n      request;",
+    description: 'the wrapped RPC wait trace'
+  },
+  {
     before: [
       '    if(import.meta.env.VITE_PERF_TRACE === \'1\') this.performanceRpcTrace?.recordCall(methodName);',
       '    if(import.meta.env.VITE_PERF_TRACE === \'1\') this.performanceRpcTrace?.recordCall(methodName);\n    const traceSearch = import.meta.env.VITE_PERF_SEARCH_TRACE === \'1\' && methodName === \'messages.searchGlobal\';'
@@ -64,35 +74,36 @@ const replacements = [
   {
     before: [
       '      return this.invokeApiInternal(method, params, options);',
-      '      const request = this.invokeApiInternal(method, params, options);\n      return traceSearch ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;'
+      '      const request = this.invokeApiInternal(method, params, options);\n      return traceSearch ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;',
+      '      const request = this.invokeApiInternal(method, params, options);\n      return traceSearch || traceHistory ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;'
     ],
-    after: '      const request = this.invokeApiInternal(method, params, options);\n      return traceSearch || traceHistory ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;',
+    after: '      const request = this.invokeApiInternal(method, params, options);\n      return traceHistory ? trackHistoryPerformanceRpc(this.performanceRpcTrace, request, params) :\n        traceSearch ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;',
     description: 'the unauthenticated RPC return hook'
   },
   {
-    before: ['      request.then(() => redactor.end(), () => redactor.end());\n      return request;'],
-    after: '      request.then(() => redactor.end(), () => redactor.end());\n      return traceHistory ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;',
+    before: [
+      '      request.then(() => redactor.end(), () => redactor.end());\n      return request;',
+      '      request.then(() => redactor.end(), () => redactor.end());\n      return traceHistory ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;'
+    ],
+    after: '      request.then(() => redactor.end(), () => redactor.end());\n      return traceHistory ? trackHistoryPerformanceRpc(this.performanceRpcTrace, request, params) : request;',
     description: 'the authenticated RPC return hook'
   }
 ];
 
 export function injectSearchRpcTracer(source) {
-  const injectedHookCounts = replacements.map(({after}) => countOccurrences(source, after));
-  if(injectedHookCounts.every((count) => count === 1)) {
-    const uninstrumentedHookCounts = replacements.map(({before}) => before.reduce((total, anchor) => total + countOccurrences(source, anchor), 0));
-    const expectedUninstrumentedHookCounts = replacements.map(() => 0);
-    if(uninstrumentedHookCounts.some((count, index) => count !== expectedUninstrumentedHookCounts[index])) {
-      throw new Error('Cannot inject search RPC tracer: already instrumented source has unexpected or ambiguous hooks');
-    }
-    return source;
-  }
-  if(injectedHookCounts.some((count) => count > 0)) {
-    throw new Error('Cannot inject search RPC tracer: source is partially instrumented or has ambiguous tracer hooks');
-  }
-
   let result = source;
   for(const {before, after, description} of replacements) {
-    result = replaceOnce(result, before, after, description);
+    const count = countOccurrences(result, after);
+    if(count > 1) throw new Error('Cannot inject search RPC tracer: already instrumented source has unexpected or ambiguous hooks');
+    if(count === 1) {
+      const start = result.indexOf(after);
+      const end = start + after.length;
+      if(before.some((anchor) => occurrenceOffsets(result, anchor).some((offset) => offset < start || offset + anchor.length > end))) {
+        throw new Error('Cannot inject search RPC tracer: already instrumented source has unexpected or ambiguous hooks');
+      }
+    } else {
+      result = replaceOnce(result, before, after, description);
+    }
   }
   return result;
 }

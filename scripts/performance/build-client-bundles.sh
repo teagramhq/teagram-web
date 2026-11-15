@@ -10,15 +10,16 @@ client_build_env="$1"
 : > "$client_build_env"
 
 VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-head-dist"
-VITE_PERF_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-trace-dist"
+VITE_PERF_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-trace-dist"
 if [ -n "$PERF_BASE_SHA" ]; then
   base_directory="$RUNNER_TEMP/teagram-web-base"
   git worktree add --detach "$base_directory" "$PERF_BASE_SHA"
   ln -s "$GITHUB_WORKSPACE/node_modules" "$base_directory/node_modules"
+  cp "$GITHUB_WORKSPACE/src/lib/appManagers/performanceHistoryTrace.ts" "$base_directory/src/lib/appManagers/performanceHistoryTrace.ts"
   node scripts/performance/inject-search-rpc-tracer.mjs "$base_directory/src/lib/appManagers/apiManager.ts"
   node scripts/performance/inject-mirror-queue-barrier.mjs "$base_directory"
   (cd "$base_directory" && VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-base-dist")
-  (cd "$base_directory" && VITE_PERF_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-base-trace-dist")
+  (cd "$base_directory" && VITE_PERF_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-base-trace-dist")
   sticker_base_sha="$(cat .github/perf-sticker-base-commit)"
   sticker_base_directory="$RUNNER_TEMP/teagram-web-sticker-base"
   git worktree add --detach "$sticker_base_directory" "$sticker_base_sha"

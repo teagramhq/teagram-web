@@ -50,6 +50,7 @@ import globalRootScope from '@lib/rootScope';
 import RepayRequestHandler from '@appManagers/utils/repayRequestHandler';
 import {AUTH_METHODS_WITH_RAW_ERRORS, AuthLogRedactor, getAuthMethod, secureAuthNetworker} from './authLogRedaction';
 import {PerformanceRpcTrace, performancePhaseTrace} from '@appManagers/performanceTrace';
+import {trackHistoryPerformanceRpc} from '@appManagers/performanceHistoryTrace';
 
 const PREMIUM_FILE_NETWORKERS_COUNT = 6;
 const REGULAR_FILE_NETWORKERS_COUNT = 3;
@@ -874,7 +875,8 @@ export class ApiManager extends ApiManagerMethods {
     if(import.meta.env.VITE_PERF_TRACE === '1' && method === 'messages.getDialogs') {
       this.finishFirstDialogsTrace();
     }
-    return import.meta.env.VITE_PERF_TRACE === '1' ?
+    const traceHistory = import.meta.env.VITE_PERF_HISTORY_TRACE === '1' && method === 'messages.getHistory';
+    return import.meta.env.VITE_PERF_TRACE === '1' && !traceHistory ?
       this.performanceRpcTrace?.trackWait(method, request) ?? request :
       request;
   }
@@ -886,7 +888,8 @@ export class ApiManager extends ApiManagerMethods {
     const traceSearch = import.meta.env.VITE_PERF_SEARCH_TRACE === '1' && methodName === 'messages.searchGlobal';
     if(!getAuthMethod(methodName, params)) {
       const request = this.invokeApiInternal(method, params, options);
-      return traceSearch || traceHistory ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;
+      return traceHistory ? trackHistoryPerformanceRpc(this.performanceRpcTrace, request, params) :
+        traceSearch ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;
     }
 
     const redactor = this.authLogRedactor ??= new AuthLogRedactor(this.log);
@@ -897,7 +900,7 @@ export class ApiManager extends ApiManagerMethods {
         options;
       const request = this.invokeApiInternal(method, params, requestOptions);
       request.then(() => redactor.end(), () => redactor.end());
-      return traceHistory ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;
+      return traceHistory ? trackHistoryPerformanceRpc(this.performanceRpcTrace, request, params) : request;
     } catch(error) {
       redactor.end();
       throw error;
