@@ -489,46 +489,56 @@ check_kubeconfig_validation() (
 )
 
 check_legacy_route_references() {
-  local directory status
-  for directory in "$@"; do
-    [[ -d "$directory" ]] || fail "legacy route scan directory is missing: $directory"
-    if grep -R -F -q -e "${legacy_routes[0]}" -e "${legacy_routes[1]}" -- "$directory"; then
-      fail "legacy route reference found in $directory"
-    else
-      status=$?
-      [[ "$status" == 1 ]] || fail "could not scan $directory for legacy route references"
-    fi
-  done
+  local matches status
+  if matches="$(git grep --untracked --exclude-standard -I -l -F \
+    -e "${legacy_routes[0]}" -e "${legacy_routes[1]}" -- .)"; then
+    fail "legacy route reference found in $matches"
+  else
+    status=$?
+    [[ "$status" == 1 ]] || fail 'could not scan repository files for legacy route references'
+  fi
 }
 
 legacy_route_self_test() (
   set -euo pipefail
-  local tmp directory route
+  local tmp fixture route
+  local fixtures=(
+    .github/workflows/nested/probe.yml
+    .github/scripts/nested/probe.sh
+    deploy/k8s/render.py
+    scripts/nested/probe.mjs
+    tools/nested/probe
+  )
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
   cp -a .github "$tmp/.github"
-  mkdir -p "$tmp/.github/workflows/nested" "$tmp/.github/scripts/nested"
+  git -C "$tmp" init --quiet
+  for fixture in "${fixtures[@]}"; do
+    mkdir -p "$tmp/$(dirname "$fixture")"
+    : >"$tmp/$fixture"
+  done
+  git -C "$tmp" add .github deploy scripts
   run_fixture_contract() (
     cd "$tmp"
     unset DEPLOY_WORKFLOW PRIVATE_ARTIFACT_WORKFLOW REPOSITORY_CI_WORKFLOW DEPLOYMENT_STACK_WORKFLOW SKIP_PUBLICATION_CALL_GRAPH
     bash .github/scripts/test-deploy-workflow-contract.sh --contract-only
   )
   run_fixture_contract >"$tmp/scan.log" 2>&1 || fail 'clean legacy route fixture must pass the contract'
-  for directory in workflows scripts; do
+  for fixture in "${fixtures[@]}"; do
     for route in "${legacy_routes[@]}"; do
-      printf '%s\n' "$route" >"$tmp/.github/$directory/nested/probe"
+      printf '%s\n' "$route" >"$tmp/$fixture"
       if run_fixture_contract >"$tmp/scan.log" 2>&1; then
-        fail "legacy route self-test accepted a reference in $directory"
+        fail "legacy route self-test accepted a reference in $fixture"
       fi
-      grep -Fq "legacy route reference found in .github/$directory" "$tmp/scan.log" ||
-        fail "legacy route self-test failed for another reason in $directory"
-      : >"$tmp/.github/$directory/nested/probe"
+      grep -Fq 'legacy route reference found' "$tmp/scan.log" ||
+        fail "legacy route self-test failed for another reason in $fixture"
+      : >"$tmp/$fixture"
     done
   done
 )
 
 check_contract() {
-  check_legacy_route_references .github/workflows .github/scripts
+  check_legacy_route_references
   if [[ "${SKIP_PUBLICATION_CALL_GRAPH:-false}" != true ]]; then
     check_publication_call_graph
   fi
