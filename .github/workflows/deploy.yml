@@ -365,30 +365,50 @@ jobs:
         with:
           node-version: 24.18.0
 
-      - name: Join the tailnet
-        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:ci-deploy
-
       - name: Install kubectl for the production k3s version
         env:
           KUBERNETES_VERSION: 1.37.1
         run: bash .github/scripts/install-kubectl.sh
 
       - name: Install the deploy kubeconfig
+        id: kubeconfig
         env:
-          KUBECONFIG_CONTENT: ${{ secrets.KUBECONFIG }}
+          KUBECONFIG_CONTENT: ${{ secrets.K3S_WEB_KUBECONFIG }}
         run: |
           set -euo pipefail
           [[ -n "$KUBECONFIG_CONTENT" ]] || {
-            echo '::error::k3s-prod KUBECONFIG secret is empty'
+            echo '::error::k3s-prod K3S_WEB_KUBECONFIG secret is empty'
             exit 1
           }
           install -d -m 700 "$RUNNER_TEMP/k8s"
           (umask 077 && printf '%s' "$KUBECONFIG_CONTENT" > "$RUNNER_TEMP/k8s/config")
+          server="$(kubectl --kubeconfig "$RUNNER_TEMP/k8s/config" config view --minify --output 'jsonpath={.clusters[0].cluster.server}')"
+          [[ "$server" == 'https://teagram.tailaa4918.ts.net:6443' ]] || {
+            echo '::error::the kubeconfig must target the cluster Tailscale API endpoint'
+            exit 1
+          }
+          ca_data="$(kubectl --kubeconfig "$RUNNER_TEMP/k8s/config" config view --minify --output 'jsonpath={.clusters[0].cluster.certificate-authority-data}')"
+          [[ -n "$ca_data" ]] || {
+            echo '::error::the kubeconfig must pin the cluster CA'
+            exit 1
+          }
+          insecure_skip="$(kubectl --kubeconfig "$RUNNER_TEMP/k8s/config" config view --minify --output 'jsonpath={.clusters[0].cluster.insecure-skip-tls-verify}')"
+          # kubectl omits an explicit false value when rendering the kubeconfig.
+          if [[ -n "$insecure_skip" ]] || grep -Fq 'insecure-skip-tls-verify' "$RUNNER_TEMP/k8s/config"; then
+            echo '::error::the kubeconfig must omit insecure-skip-tls-verify'
+            exit 1
+          fi
           printf 'KUBECONFIG=%s\n' "$RUNNER_TEMP/k8s/config" >> "$GITHUB_ENV"
+          host="${server#https://}"
+          printf 'api_host=%s\n' "${host%:6443}" >> "$GITHUB_OUTPUT"
+
+      - name: Join the tailnet
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ secrets.K3S_TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.K3S_TS_OAUTH_SECRET }}
+          tags: tag:k3s-deploy
+          ping: ${{ steps.kubeconfig.outputs.api_host }}
 
       - name: Deploy, verify the public route, and roll back on failure
         env:
