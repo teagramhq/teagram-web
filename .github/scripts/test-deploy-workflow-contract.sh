@@ -12,7 +12,6 @@ expected_issue_description='Issue key to report this run to (e.g. MAIN-123). Lea
 private_artifact_workflow="${PRIVATE_ARTIFACT_WORKFLOW:-.github/workflows/private-artifact.yml}"
 repository_ci_workflow="${REPOSITORY_CI_WORKFLOW:-.github/workflows/ci.yml}"
 deployment_stack_workflow="${DEPLOYMENT_STACK_WORKFLOW:-.github/workflows/deployment-stack-checks.yml}"
-identity_guard_script="${DEPLOY_IDENTITY_GUARD_SCRIPT:-.github/scripts/verify-deploy-identity.sh}"
 identity_scan_root="${DEPLOY_IDENTITY_SCAN_ROOT:-.}"
 # Split legacy references so this contract does not scan itself.
 legacy_routes=("tag:ci-""deploy" "teagram-k3s-""api")
@@ -516,10 +515,15 @@ check_legacy_deploy_identity_references() {
 
 check_deploy_identity_guard_behavior() (
   set -euo pipefail
-  local tmp expected_identity
+  local tmp expected_identity legacy_pin
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
   expected_identity='system:serviceaccount:teagram:teagram-web-deployer'
+  legacy_pin="$tmp/legacy-pin"
+  mkdir -p "$legacy_pin"
+  query '.jobs.deploy-web.steps[] | select(.name == "Verify deploy kubeconfig identity and permissions") | .run' >"$tmp/guard.sh"
+  [[ ! -e "$legacy_pin/.github/scripts/verify-deploy-identity.sh" ]] ||
+    fail 'the legacy pin fixture must not contain the deploy identity guard script'
   mkdir -p "$tmp/bin"
   cat >"$tmp/bin/kubectl" <<'SH'
 #!/usr/bin/env bash
@@ -558,8 +562,11 @@ SH
     local output="$1" status
     shift
     : >"$tmp/calls"
-    if env PATH="$tmp/bin:$PATH" TEST_KUBECTL_LOG="$tmp/calls" "$@" \
-      bash "$identity_guard_script" >"$output" 2>&1; then
+    if (
+      cd "$legacy_pin"
+      env PATH="$tmp/bin:$PATH" TEST_KUBECTL_LOG="$tmp/calls" "$@" \
+        bash "$tmp/guard.sh" >"$output" 2>&1
+    ); then
       return 0
     else
       status=$?
@@ -745,10 +752,13 @@ check_contract() {
     fail 'tailnet join must use the k3s deploy client and ping the validated API host'
   [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Verify deploy kubeconfig identity and permissions")] | length')" == 1 ]] ||
     fail 'production must verify the least-privilege web kubeconfig identity before deployment'
-  [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Verify deploy kubeconfig identity and permissions") | .run][0]')" == \
-    'bash .github/scripts/verify-deploy-identity.sh' ]] ||
-    fail 'production must run the deploy kubeconfig identity and permission guard'
-  [[ -f "$identity_guard_script" ]] || fail 'the deploy kubeconfig identity guard script must exist'
+  local identity_guard_run
+  identity_guard_run="$(query '[.jobs.deploy-web.steps[] | select(.name == "Verify deploy kubeconfig identity and permissions") | .run][0]')"
+  [[ "$identity_guard_run" == *'kubectl auth whoami'* &&
+    "$identity_guard_run" == *'system:serviceaccount:teagram:teagram-web-deployer'* &&
+    "$identity_guard_run" == *'kubectl auth can-i get secrets -n teagram'* &&
+    "$identity_guard_run" == *'kubectl auth can-i create pods -n teagram'* ]] ||
+    fail 'production must run the complete deploy identity and permission guard from the workflow revision'
   local kubeconfig_index tailnet_index identity_guard_index deploy_index step_name
   kubeconfig_index="$(query '.jobs.deploy-web.steps | to_entries | .[] | select(.value.name == "Install the deploy kubeconfig") | .key')"
   tailnet_index="$(query '.jobs.deploy-web.steps | to_entries | .[] | select(.value.name == "Join the tailnet") | .key')"
@@ -760,7 +770,7 @@ check_contract() {
   (( kubeconfig_index < tailnet_index && tailnet_index < identity_guard_index && identity_guard_index < deploy_index )) ||
     fail 'the deploy kubeconfig identity guard must run before the first cluster write'
   for step_name in 'Install the deploy kubeconfig' 'Join the tailnet' 'Verify deploy kubeconfig identity and permissions' 'Deploy, verify the public route, and roll back on failure'; do
-    [[ "$(STEP_NAME="$step_name" query '[.jobs.deploy-web.steps[] | select(.name == strenv(STEP_NAME)) | .if // ""][0]')" == '' &&
+    [[ "$(STEP_NAME="$step_name" query '[.jobs.deploy-web.steps[] | select(.name == strenv(STEP_NAME)) | has("if")][0]')" == false &&
       "$(STEP_NAME="$step_name" query '[.jobs.deploy-web.steps[] | select(.name == strenv(STEP_NAME)) | ."continue-on-error" // false][0]')" == false ]] ||
       fail "$step_name must stop on earlier failure"
   done
@@ -827,6 +837,7 @@ self_test() {
     'del(.jobs.deploy-web.steps[] | select(.name == "Join the tailnet").with.ping)'
     '(.jobs.deploy-web.steps[] | select(.name == "Join the tailnet") | .with."oauth-secret") = "${{ secrets.OLD_SECRET }}"'
     '(.jobs.deploy-web.steps[] | select(.name == "Join the tailnet") | ."continue-on-error") = true'
+    '(.jobs.deploy-web.steps[] | select(.name == "Verify deploy kubeconfig identity and permissions") | .if) = false'
     'del(.jobs.deploy-web.steps[] | select(.name == "Verify deploy kubeconfig identity and permissions"))'
     '(.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the public route, and roll back on failure") | .if) = "always()"'
     '.permissions.contents = "write"'
