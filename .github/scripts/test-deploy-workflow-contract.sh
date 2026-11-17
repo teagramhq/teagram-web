@@ -13,6 +13,7 @@ private_artifact_workflow="${PRIVATE_ARTIFACT_WORKFLOW:-.github/workflows/privat
 repository_ci_workflow="${REPOSITORY_CI_WORKFLOW:-.github/workflows/ci.yml}"
 deployment_stack_workflow="${DEPLOYMENT_STACK_WORKFLOW:-.github/workflows/deployment-stack-checks.yml}"
 identity_guard_script="${DEPLOY_IDENTITY_GUARD_SCRIPT:-.github/scripts/verify-deploy-identity.sh}"
+identity_scan_root="${DEPLOY_IDENTITY_SCAN_ROOT:-.}"
 # Split legacy references so this contract does not scan itself.
 legacy_routes=("tag:ci-""deploy" "teagram-k3s-""api")
 legacy_deploy_identity=("teagram-" "deployer")
@@ -504,7 +505,8 @@ check_legacy_route_references() {
 check_legacy_deploy_identity_references() {
   local identity matches status
   identity="${legacy_deploy_identity[0]}${legacy_deploy_identity[1]}"
-  if matches="$(grep -RIEil -- "$identity" "$workflow" .github/workflows .github/scripts deploy)"; then
+  if matches="$(grep -RIEil -- "$identity" "$workflow" "$identity_scan_root/.github/workflows" \
+    "$identity_scan_root/.github/scripts" "$identity_scan_root/deploy")"; then
     fail "legacy deploy identity reference found in $matches"
   else
     status=$?
@@ -530,11 +532,19 @@ case "$*" in
     ;;
   'auth can-i get secrets -n teagram')
     [[ "${TEST_SECRETS_FAIL:-false}" != true ]] || exit 1
-    printf '%s\n' "${TEST_SECRET_ACCESS:-no}"
+    secret_access="${TEST_SECRET_ACCESS:-no}"
+    printf '%s\n' "$secret_access"
+    if [[ "$secret_access" == no ]]; then
+      exit 1
+    fi
     ;;
   'auth can-i create pods -n teagram')
     [[ "${TEST_PODS_FAIL:-false}" != true ]] || exit 1
-    printf '%s\n' "${TEST_POD_ACCESS:-no}"
+    pod_access="${TEST_POD_ACCESS:-no}"
+    printf '%s\n' "$pod_access"
+    if [[ "$pod_access" == no ]]; then
+      exit 1
+    fi
     ;;
   *)
     echo "unexpected kubectl invocation: $*" >&2
@@ -572,8 +582,14 @@ EOF
   if run_identity_guard "$tmp/whoami-failure.log" TEST_IDENTITY=unexpected; then
     fail 'the deploy identity guard accepted an unexpected kubeconfig identity'
   fi
-  grep -Fq '::error::kubectl auth whoami failed' "$tmp/whoami-failure.log" ||
-    fail 'an identity mismatch must name the failed kubectl auth whoami check'
+  grep -Fq '::error::kubectl auth whoami returned unexpected; expected' "$tmp/whoami-failure.log" ||
+    fail 'an identity mismatch must report the returned and expected kubectl auth whoami values'
+
+  if run_identity_guard "$tmp/whoami-command-error.log" TEST_WHOAMI_FAIL=true; then
+    fail 'the deploy identity guard accepted a kubectl auth whoami error'
+  fi
+  grep -Fq '::error::kubectl auth whoami failed' "$tmp/whoami-command-error.log" ||
+    fail 'a kubectl auth whoami error must name the failed check'
 
   if run_identity_guard "$tmp/secrets-failure.log" TEST_SECRET_ACCESS=yes; then
     fail 'the deploy identity guard accepted secret access'
@@ -581,11 +597,23 @@ EOF
   grep -Fq '::error::kubectl auth can-i get secrets -n teagram failed' "$tmp/secrets-failure.log" ||
     fail 'unexpected secret access must name the failed kubectl auth can-i check'
 
+  if run_identity_guard "$tmp/secrets-command-error.log" TEST_SECRETS_FAIL=true; then
+    fail 'the deploy identity guard accepted a kubectl auth can-i secrets error'
+  fi
+  grep -Fq '::error::kubectl auth can-i get secrets -n teagram failed' "$tmp/secrets-command-error.log" ||
+    fail 'a kubectl auth can-i secrets error must name the failed check'
+
   if run_identity_guard "$tmp/pods-failure.log" TEST_POD_ACCESS=yes; then
     fail 'the deploy identity guard accepted pod creation access'
   fi
   grep -Fq '::error::kubectl auth can-i create pods -n teagram failed' "$tmp/pods-failure.log" ||
     fail 'unexpected pod creation access must name the failed kubectl auth can-i check'
+
+  if run_identity_guard "$tmp/pods-command-error.log" TEST_PODS_FAIL=true; then
+    fail 'the deploy identity guard accepted a kubectl auth can-i pods error'
+  fi
+  grep -Fq '::error::kubectl auth can-i create pods -n teagram failed' "$tmp/pods-command-error.log" ||
+    fail 'a kubectl auth can-i pods error must name the failed check'
 )
 
 legacy_route_self_test() (
@@ -834,6 +862,17 @@ self_test() {
   fi
   grep -Fq 'legacy deploy identity reference found' "$tmp/deploy-legacy-identity.out" ||
     fail 'the legacy deploy identity mutation must fail the workflow and deploy script scan'
+
+  local identity_scan_root
+  identity_scan_root="$tmp/identity-scan"
+  mkdir -p "$identity_scan_root/.github/workflows" "$identity_scan_root/.github/scripts" "$identity_scan_root/deploy"
+  printf '%s\n' "$forbidden_identity" >"$identity_scan_root/.github/scripts/deploy.sh"
+  if SKIP_PUBLICATION_CALL_GRAPH=true DEPLOY_IDENTITY_SCAN_ROOT="$identity_scan_root" \
+    bash "$0" --contract-only >"$tmp/deploy-script-legacy-identity.out" 2>&1; then
+    fail 'contract accepted the legacy deploy identity in a deploy script'
+  fi
+  grep -Fq 'legacy deploy identity reference found' "$tmp/deploy-script-legacy-identity.out" ||
+    fail 'the legacy deploy identity fixture must fail the workflow and deploy script scan'
 }
 
 check_contract
