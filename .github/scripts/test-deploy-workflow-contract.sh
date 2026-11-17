@@ -12,8 +12,10 @@ expected_issue_description='Issue key to report this run to (e.g. MAIN-123). Lea
 private_artifact_workflow="${PRIVATE_ARTIFACT_WORKFLOW:-.github/workflows/private-artifact.yml}"
 repository_ci_workflow="${REPOSITORY_CI_WORKFLOW:-.github/workflows/ci.yml}"
 deployment_stack_workflow="${DEPLOYMENT_STACK_WORKFLOW:-.github/workflows/deployment-stack-checks.yml}"
-# Split the names so this contract does not itself contain an old route reference.
+identity_scan_root="${DEPLOY_IDENTITY_SCAN_ROOT:-.}"
+# Split legacy references so this contract does not scan itself.
 legacy_routes=("tag:ci-""deploy" "teagram-k3s-""api")
+legacy_deploy_identity=("teagram-" "deployer")
 
 fail() {
   printf '%s: %s\n' "$workflow" "$1" >&2
@@ -499,6 +501,128 @@ check_legacy_route_references() {
   fi
 }
 
+check_legacy_deploy_identity_references() {
+  local identity matches status
+  identity="${legacy_deploy_identity[0]}${legacy_deploy_identity[1]}"
+  if matches="$(grep -RIEil -- "$identity" "$workflow" "$identity_scan_root/.github/workflows" \
+    "$identity_scan_root/.github/scripts" "$identity_scan_root/deploy")"; then
+    fail "legacy deploy identity reference found in $matches"
+  else
+    status=$?
+    [[ "$status" == 1 ]] || fail 'could not scan deploy workflows and scripts for legacy identity references'
+  fi
+}
+
+check_deploy_identity_guard_behavior() (
+  set -euo pipefail
+  local tmp expected_identity legacy_pin
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  expected_identity='system:serviceaccount:teagram:teagram-web-deployer'
+  legacy_pin="$tmp/legacy-pin"
+  mkdir -p "$legacy_pin"
+  query '.jobs.deploy-web.steps[] | select(.name == "Verify deploy kubeconfig identity and permissions") | .run' >"$tmp/guard.sh"
+  [[ ! -e "$legacy_pin/.github/scripts/verify-deploy-identity.sh" ]] ||
+    fail 'the legacy pin fixture must not contain the deploy identity guard script'
+  mkdir -p "$tmp/bin"
+  cat >"$tmp/bin/kubectl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${TEST_KUBECTL_LOG:?}"
+case "$*" in
+  'auth whoami -o jsonpath={.status.userInfo.username}')
+    [[ "${TEST_WHOAMI_FAIL:-false}" != true ]] || exit 1
+    printf '%s' "${TEST_IDENTITY:-system:serviceaccount:teagram:teagram-web-deployer}"
+    ;;
+  'auth can-i get secrets -n teagram')
+    [[ "${TEST_SECRETS_FAIL:-false}" != true ]] || exit 1
+    secret_access="${TEST_SECRET_ACCESS:-no}"
+    printf '%s\n' "$secret_access"
+    if [[ "$secret_access" == no ]]; then
+      exit 1
+    fi
+    ;;
+  'auth can-i create pods -n teagram')
+    [[ "${TEST_PODS_FAIL:-false}" != true ]] || exit 1
+    pod_access="${TEST_POD_ACCESS:-no}"
+    printf '%s\n' "$pod_access"
+    if [[ "$pod_access" == no ]]; then
+      exit 1
+    fi
+    ;;
+  *)
+    echo "unexpected kubectl invocation: $*" >&2
+    exit 2
+    ;;
+esac
+SH
+  chmod +x "$tmp/bin/kubectl"
+
+  run_identity_guard() {
+    local output="$1" status
+    shift
+    : >"$tmp/calls"
+    if (
+      cd "$legacy_pin"
+      env PATH="$tmp/bin:$PATH" TEST_KUBECTL_LOG="$tmp/calls" "$@" \
+        bash "$tmp/guard.sh" >"$output" 2>&1
+    ); then
+      return 0
+    else
+      status=$?
+      return "$status"
+    fi
+  }
+
+  if ! run_identity_guard "$tmp/success.log" TEST_IDENTITY="$expected_identity" \
+    TEST_SECRET_ACCESS=no TEST_POD_ACCESS=no; then
+    fail 'the deploy identity guard must accept the web identity with denied secret and pod access'
+  fi
+  cat >"$tmp/expected-calls" <<'EOF'
+auth whoami -o jsonpath={.status.userInfo.username}
+auth can-i get secrets -n teagram
+auth can-i create pods -n teagram
+EOF
+  diff -u "$tmp/expected-calls" "$tmp/calls" >/dev/null ||
+    fail 'the deploy identity guard must run each identity and permission check'
+
+  if run_identity_guard "$tmp/whoami-failure.log" TEST_IDENTITY=unexpected; then
+    fail 'the deploy identity guard accepted an unexpected kubeconfig identity'
+  fi
+  grep -Fq '::error::kubectl auth whoami returned unexpected; expected' "$tmp/whoami-failure.log" ||
+    fail 'an identity mismatch must report the returned and expected kubectl auth whoami values'
+
+  if run_identity_guard "$tmp/whoami-command-error.log" TEST_WHOAMI_FAIL=true; then
+    fail 'the deploy identity guard accepted a kubectl auth whoami error'
+  fi
+  grep -Fq '::error::kubectl auth whoami failed' "$tmp/whoami-command-error.log" ||
+    fail 'a kubectl auth whoami error must name the failed check'
+
+  if run_identity_guard "$tmp/secrets-failure.log" TEST_SECRET_ACCESS=yes; then
+    fail 'the deploy identity guard accepted secret access'
+  fi
+  grep -Fq '::error::kubectl auth can-i get secrets -n teagram failed' "$tmp/secrets-failure.log" ||
+    fail 'unexpected secret access must name the failed kubectl auth can-i check'
+
+  if run_identity_guard "$tmp/secrets-command-error.log" TEST_SECRETS_FAIL=true; then
+    fail 'the deploy identity guard accepted a kubectl auth can-i secrets error'
+  fi
+  grep -Fq '::error::kubectl auth can-i get secrets -n teagram failed' "$tmp/secrets-command-error.log" ||
+    fail 'a kubectl auth can-i secrets error must name the failed check'
+
+  if run_identity_guard "$tmp/pods-failure.log" TEST_POD_ACCESS=yes; then
+    fail 'the deploy identity guard accepted pod creation access'
+  fi
+  grep -Fq '::error::kubectl auth can-i create pods -n teagram failed' "$tmp/pods-failure.log" ||
+    fail 'unexpected pod creation access must name the failed kubectl auth can-i check'
+
+  if run_identity_guard "$tmp/pods-command-error.log" TEST_PODS_FAIL=true; then
+    fail 'the deploy identity guard accepted a kubectl auth can-i pods error'
+  fi
+  grep -Fq '::error::kubectl auth can-i create pods -n teagram failed' "$tmp/pods-command-error.log" ||
+    fail 'a kubectl auth can-i pods error must name the failed check'
+)
+
 legacy_route_self_test() (
   set -euo pipefail
   local tmp fixture route
@@ -539,6 +663,7 @@ legacy_route_self_test() (
 
 check_contract() {
   check_legacy_route_references
+  check_legacy_deploy_identity_references
   if [[ "${SKIP_PUBLICATION_CALL_GRAPH:-false}" != true ]]; then
     check_publication_call_graph
   fi
@@ -625,16 +750,27 @@ check_contract() {
     "$(query '[.jobs.deploy-web.steps[] | select(.name == "Join the tailnet") | .with.tags][0]')" == 'tag:k3s-deploy' &&
     "$(query '[.jobs.deploy-web.steps[] | select(.name == "Join the tailnet") | .with.ping][0]')" == '${{ steps.kubeconfig.outputs.api_host }}' ]] ||
     fail 'tailnet join must use the k3s deploy client and ping the validated API host'
-  local kubeconfig_index tailnet_index deploy_index step_name
+  [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Verify deploy kubeconfig identity and permissions")] | length')" == 1 ]] ||
+    fail 'production must verify the least-privilege web kubeconfig identity before deployment'
+  local identity_guard_run
+  identity_guard_run="$(query '[.jobs.deploy-web.steps[] | select(.name == "Verify deploy kubeconfig identity and permissions") | .run][0]')"
+  [[ "$identity_guard_run" == *'kubectl auth whoami'* &&
+    "$identity_guard_run" == *'system:serviceaccount:teagram:teagram-web-deployer'* &&
+    "$identity_guard_run" == *'kubectl auth can-i get secrets -n teagram'* &&
+    "$identity_guard_run" == *'kubectl auth can-i create pods -n teagram'* ]] ||
+    fail 'production must run the complete deploy identity and permission guard from the workflow revision'
+  local kubeconfig_index tailnet_index identity_guard_index deploy_index step_name
   kubeconfig_index="$(query '.jobs.deploy-web.steps | to_entries | .[] | select(.value.name == "Install the deploy kubeconfig") | .key')"
   tailnet_index="$(query '.jobs.deploy-web.steps | to_entries | .[] | select(.value.name == "Join the tailnet") | .key')"
+  identity_guard_index="$(query '.jobs.deploy-web.steps | to_entries | .[] | select(.value.name == "Verify deploy kubeconfig identity and permissions") | .key')"
   deploy_index="$(query '.jobs.deploy-web.steps | to_entries | .[] | select(.value.name == "Deploy, verify the public route, and roll back on failure") | .key')"
-  [[ "$kubeconfig_index" =~ ^[0-9]+$ && "$tailnet_index" =~ ^[0-9]+$ && "$deploy_index" =~ ^[0-9]+$ ]] ||
+  [[ "$kubeconfig_index" =~ ^[0-9]+$ && "$tailnet_index" =~ ^[0-9]+$ &&
+    "$identity_guard_index" =~ ^[0-9]+$ && "$deploy_index" =~ ^[0-9]+$ ]] ||
     fail 'deployment step indices must be present'
-  (( kubeconfig_index < tailnet_index && tailnet_index < deploy_index )) ||
-    fail 'kubeconfig validation and tailnet ping must precede deployment'
-  for step_name in 'Install the deploy kubeconfig' 'Join the tailnet' 'Deploy, verify the public route, and roll back on failure'; do
-    [[ "$(STEP_NAME="$step_name" query '[.jobs.deploy-web.steps[] | select(.name == strenv(STEP_NAME)) | .if // ""][0]')" == '' &&
+  (( kubeconfig_index < tailnet_index && tailnet_index < identity_guard_index && identity_guard_index < deploy_index )) ||
+    fail 'the deploy kubeconfig identity guard must run before the first cluster write'
+  for step_name in 'Install the deploy kubeconfig' 'Join the tailnet' 'Verify deploy kubeconfig identity and permissions' 'Deploy, verify the public route, and roll back on failure'; do
+    [[ "$(STEP_NAME="$step_name" query '[.jobs.deploy-web.steps[] | select(.name == strenv(STEP_NAME)) | has("if")][0]')" == false &&
       "$(STEP_NAME="$step_name" query '[.jobs.deploy-web.steps[] | select(.name == strenv(STEP_NAME)) | ."continue-on-error" // false][0]')" == false ]] ||
       fail "$step_name must stop on earlier failure"
   done
@@ -701,6 +837,8 @@ self_test() {
     'del(.jobs.deploy-web.steps[] | select(.name == "Join the tailnet").with.ping)'
     '(.jobs.deploy-web.steps[] | select(.name == "Join the tailnet") | .with."oauth-secret") = "${{ secrets.OLD_SECRET }}"'
     '(.jobs.deploy-web.steps[] | select(.name == "Join the tailnet") | ."continue-on-error") = true'
+    '(.jobs.deploy-web.steps[] | select(.name == "Verify deploy kubeconfig identity and permissions") | .if) = false'
+    'del(.jobs.deploy-web.steps[] | select(.name == "Verify deploy kubeconfig identity and permissions"))'
     '(.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the public route, and roll back on failure") | .if) = "always()"'
     '.permissions.contents = "write"'
   )
@@ -712,10 +850,45 @@ self_test() {
       exit 1
     fi
   done
+
+  local guard_name forbidden_identity
+  guard_name='Verify deploy kubeconfig identity and permissions'
+  TEST_GUARD_NAME="$guard_name" yq \
+    '(.jobs.deploy-web.steps) |= ([.[] | select(.name != strenv(TEST_GUARD_NAME))] + [.[] | select(.name == strenv(TEST_GUARD_NAME))])' \
+    "$workflow" >"$tmp/deploy-after-write.yml"
+  if SKIP_PUBLICATION_CALL_GRAPH=true DEPLOY_WORKFLOW="$tmp/deploy-after-write.yml" \
+    bash "$0" --contract-only >"$tmp/deploy-after-write.out" 2>&1; then
+    fail 'contract accepted a deploy identity guard moved after the first cluster write'
+  fi
+  grep -Fq 'before the first cluster write' "$tmp/deploy-after-write.out" ||
+    fail 'moving the deploy identity guard must fail the cluster-write ordering check'
+
+  forbidden_identity="${legacy_deploy_identity[0]}${legacy_deploy_identity[1]}"
+  TEST_FORBIDDEN_IDENTITY="$forbidden_identity" yq \
+    '(.jobs.deploy-web.steps[] | select(.name == "Verify deploy kubeconfig identity and permissions") | .run) = strenv(TEST_FORBIDDEN_IDENTITY)' \
+    "$workflow" >"$tmp/deploy-legacy-identity.yml"
+  if SKIP_PUBLICATION_CALL_GRAPH=true DEPLOY_WORKFLOW="$tmp/deploy-legacy-identity.yml" \
+    bash "$0" --contract-only >"$tmp/deploy-legacy-identity.out" 2>&1; then
+    fail 'contract accepted the legacy deploy identity in the workflow'
+  fi
+  grep -Fq 'legacy deploy identity reference found' "$tmp/deploy-legacy-identity.out" ||
+    fail 'the legacy deploy identity mutation must fail the workflow and deploy script scan'
+
+  local identity_scan_root
+  identity_scan_root="$tmp/identity-scan"
+  mkdir -p "$identity_scan_root/.github/workflows" "$identity_scan_root/.github/scripts" "$identity_scan_root/deploy"
+  printf '%s\n' "$forbidden_identity" >"$identity_scan_root/.github/scripts/deploy.sh"
+  if SKIP_PUBLICATION_CALL_GRAPH=true DEPLOY_IDENTITY_SCAN_ROOT="$identity_scan_root" \
+    bash "$0" --contract-only >"$tmp/deploy-script-legacy-identity.out" 2>&1; then
+    fail 'contract accepted the legacy deploy identity in a deploy script'
+  fi
+  grep -Fq 'legacy deploy identity reference found' "$tmp/deploy-script-legacy-identity.out" ||
+    fail 'the legacy deploy identity fixture must fail the workflow and deploy script scan'
 }
 
 check_contract
 if [[ "${1:-}" != '--contract-only' ]]; then
+  check_deploy_identity_guard_behavior
   legacy_route_self_test
   publication_call_graph_self_test
   self_test
