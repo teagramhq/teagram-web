@@ -410,6 +410,9 @@ jobs:
           tags: tag:k3s-deploy
           ping: ${{ steps.kubeconfig.outputs.api_host }}
 
+      - name: Verify deploy kubeconfig identity and permissions
+        run: bash .github/scripts/verify-deploy-identity.sh
+
       - name: Deploy, verify the public route, and roll back on failure
         env:
           DEPLOY_SHA: ${{ steps.refresh.outputs.sha }}
