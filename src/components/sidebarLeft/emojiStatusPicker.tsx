@@ -119,5 +119,8 @@ export function openEmojiStatusPicker(options: {
     // if(iconEmojiId) {
     //   emojiTab.setActive({docId: iconEmojiId, emoji: ''});
     // }
+  }, (error) => {
+    // Closing the picker can destroy the tab while its initialization is pending.
+    if((error as ApiError)?.type !== 'MIDDLEWARE') throw error;
   });
 }
