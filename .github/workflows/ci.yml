@@ -38,6 +38,13 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Check out workflow revision for web checks
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .ci-workflow
+          persist-credentials: false
+
       - name: Set up pnpm
         uses: pnpm/action-setup@0c17529a66aca453f9227af23103ed11469b1e47 # v4.0.0
         with:
@@ -61,7 +68,8 @@ jobs:
         run: node scripts/private-artifact-release.mjs write-target-outputs
 
       - name: Run independent web checks in a three-worker pool
-        run: bash .github/scripts/run-test-web-pool.sh checks
+        working-directory: ${{ github.workspace }}
+        run: bash .ci-workflow/.github/scripts/run-test-web-pool.sh checks
 
       - name: Generate changelogs
         run: pnpm run generate-changelog

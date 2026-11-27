@@ -40,7 +40,7 @@ run_stage() {
   local result_file="$stage_dir/$stage.exit"
   local status
 
-  if run_stage_command "$stage" 2>&1 | tee "$log_file" | sed --unbuffered "s/^/[$stage] /"; then
+  if run_stage_command "$stage" 2>&1 | tee "$log_file" | sed -u "s/^/[$stage] /"; then
     status=0
   else
     status=$?

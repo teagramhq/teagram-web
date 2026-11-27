@@ -362,14 +362,18 @@ describe('private artifact target comparison', () => {
     expect(checkoutStep).toContain('fetch-depth: 0');
   });
 
-  it('uses the reviewed private target only for the production bundle build', () => {
+  it('uses workflow-revision pool code while testing the reviewed private target', () => {
     const workflow = readFileSync(join(repositoryRoot, '.github/workflows/ci.yml'), 'utf8');
+    const poolScriptCheckoutStep = workflow.split('      - name: Check out workflow revision for web checks\n')[1]?.split('\n      - name: ')[0];
     const testStep = workflow.split('      - name: Run independent web checks in a three-worker pool\n')[1]?.split('\n      - name: ')[0];
     const buildStep = workflow.split('      - name: Build and audit production bundle\n')[1]?.split('\n      - name: ')[0];
     const pool = readFileSync(join(repositoryRoot, '.github/scripts/run-test-web-pool.sh'), 'utf8');
 
     expect(workflow).toContain('node scripts/private-artifact-release.mjs write-target-outputs');
-    expect(testStep).toContain('run: bash .github/scripts/run-test-web-pool.sh checks');
+    expect(poolScriptCheckoutStep).toContain('ref: ${{ github.workflow_sha }}');
+    expect(poolScriptCheckoutStep).toContain('path: .ci-workflow');
+    expect(testStep).toContain('working-directory: ${{ github.workspace }}');
+    expect(testStep).toContain('run: bash .ci-workflow/.github/scripts/run-test-web-pool.sh checks');
     expect(testStep).not.toContain('MTPROTO_');
     expect(workflow).toContain('run: pnpm run generate-changelog');
     expect(buildStep).toContain('MTPROTO_TARGET_MODE: ${{ steps.target.outputs.mode }}');
@@ -381,6 +385,8 @@ describe('private artifact target comparison', () => {
     expect(pool).toContain('pnpm test --run');
     expect(pool).toContain('pnpm run typecheck');
     expect(pool).toContain('wait -n || true');
+    expect(pool).toContain('sed -u');
+    expect(pool).not.toContain('sed --unbuffered');
     expect(pool).toContain('::error title=test: web / %s::stage %s failed with exit code %s');
     expect(workflow).toContain('      - test-web-custom-server\n');
     expect(workflow).toContain('      - check-web-source-map\n');
@@ -392,13 +398,15 @@ describe('private artifact target comparison', () => {
     const runnerTemp = join(directory, 'runner-temp');
     const markerDirectory = join(directory, 'markers');
     const callLog = join(directory, 'pnpm-calls.log');
+    const sourceCheckout = join(directory, 'source-checkout');
     const fakePnpm = join(binDirectory, 'pnpm');
 
     mkdirSync(binDirectory);
     mkdirSync(markerDirectory);
+    mkdirSync(sourceCheckout);
     writeFileSync(fakePnpm, `#!/usr/bin/env bash
 set -euo pipefail
-printf '%s\\n' "$*" >> "$PNPM_CALL_LOG"
+printf '%s|%s\\n' "$PWD" "$*" >> "$PNPM_CALL_LOG"
 case "$*" in
   'test --run') stage=unit-tests ;;
   'run typecheck') stage=typecheck ;;
@@ -425,7 +433,7 @@ fi
     execFileSync('chmod', ['+x', fakePnpm]);
 
     const result = spawnSync('bash', [join(repositoryRoot, '.github/scripts/run-test-web-pool.sh'), 'checks'], {
-      cwd: repositoryRoot,
+      cwd: sourceCheckout,
       encoding: 'utf8',
       env: {
         ...process.env,
@@ -444,9 +452,9 @@ fi
     expect(output).toContain('[lint] all three stages started');
     expect(readdirSync(markerDirectory).sort()).toEqual(['lint', 'typecheck', 'unit-tests']);
     expect(readFileSync(callLog, 'utf8').trim().split('\n')).toEqual(expect.arrayContaining([
-      'test --run',
-      'run typecheck',
-      'run lint'
+      `${sourceCheckout}|test --run`,
+      `${sourceCheckout}|run typecheck`,
+      `${sourceCheckout}|run lint`
     ]));
   });
 
