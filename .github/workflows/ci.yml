@@ -30,6 +30,87 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
+    steps:
+      - name: Check out code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.checkout_ref || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out workflow revision for web checks
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .ci-workflow
+          sparse-checkout: |
+            .github/scripts/run-test-web-pool.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0c17529a66aca453f9227af23103ed11469b1e47 # v4.0.0
+        with:
+          version: 11.16.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # GitHub-hosted Ubuntu images already include browser runtime libraries; avoid apt mirror resolution here.
+      - name: Install Playwright Chromium and Firefox
+        run: pnpm exec playwright install chromium firefox
+
+      - name: Read and validate the reviewed private target
+        id: target
+        run: node scripts/private-artifact-release.mjs write-target-outputs
+
+      - name: Run independent web checks in a three-worker pool
+        working-directory: ${{ github.workspace }}
+        run: bash .ci-workflow/.github/scripts/run-test-web-pool.sh checks
+
+      - name: Generate changelogs
+        run: pnpm run generate-changelog
+
+      - name: Build and audit production bundle
+        env:
+          MTPROTO_TARGET_MODE: ${{ steps.target.outputs.mode }}
+          MTPROTO_PRIVATE_ENDPOINT: ${{ steps.target.outputs.endpoint }}
+          MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ steps.target.outputs.key_file }}
+        run: pnpm exec vite build && pnpm run check-bundle
+
+      - name: Test sticker install and import flows in the popup sandbox
+        run: >-
+          pnpm exec playwright test
+          e2e/popupSandbox.spec.ts
+          --project=chromium
+          --grep "opens and installs a sticker set from a direct share URL|imports a folder pack and opens its shareable sticker set|imports a valid ZIP through the worker and sends its bytes as a ZIP source|does not show the import controls when sticker import is disabled"
+
+      - name: Test custom-server discovery in the private build
+        run: >-
+          pnpm exec playwright test
+          -c playwright.private-artifact.config.ts
+          e2e/customServerLocalSignIn.spec.ts
+          --project=private-artifact-chromium
+          --project=private-artifact-firefox
+          --grep "private artifact"
+
+      - name: Run standard auth browser smoke
+        run: pnpm run test:standard-auth
+
+      - name: Run reaction artwork browser regression
+        run: pnpm run test:reaction-artwork
+
+  test-web-custom-server:
+    name: 'test: web-custom-server'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:18-alpine
@@ -69,53 +150,6 @@ jobs:
       # GitHub-hosted Ubuntu images already include browser runtime libraries; avoid apt mirror resolution here.
       - name: Install Playwright Chromium and Firefox
         run: pnpm exec playwright install chromium firefox
-
-      - name: Read and validate the reviewed private target
-        id: target
-        run: node scripts/private-artifact-release.mjs write-target-outputs
-
-      - name: Test, typecheck and prepare bundle
-        run: pnpm test --run && pnpm run typecheck && pnpm run generate-changelog
-
-      - name: Test sticker install and import flows in the popup sandbox
-        run: >-
-          pnpm exec playwright test
-          e2e/popupSandbox.spec.ts
-          --project=chromium
-          --grep "opens and installs a sticker set from a direct share URL|imports a folder pack and opens its shareable sticker set|imports a valid ZIP through the worker and sends its bytes as a ZIP source|does not show the import controls when sticker import is disabled"
-
-      - name: Build and audit production bundle
-        env:
-          MTPROTO_TARGET_MODE: ${{ steps.target.outputs.mode }}
-          MTPROTO_PRIVATE_ENDPOINT: ${{ steps.target.outputs.endpoint }}
-          MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ steps.target.outputs.key_file }}
-        run: pnpm exec vite build && pnpm run check-bundle
-
-      - name: Test custom-server discovery in the private build
-        run: >-
-          pnpm exec playwright test
-          -c playwright.private-artifact.config.ts
-          e2e/customServerLocalSignIn.spec.ts
-          --project=private-artifact-chromium
-          --project=private-artifact-firefox
-          --grep "private artifact"
-
-      - name: Audit default bindings in an isolated source-mapped build
-        env:
-          CI: 'true'
-          MTPROTO_TARGET_MODE: ${{ steps.target.outputs.mode }}
-          MTPROTO_PRIVATE_ENDPOINT: ${{ steps.target.outputs.endpoint }}
-          MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ steps.target.outputs.key_file }}
-          MTPROTO_SOURCE_MAP_AUDIT: '1'
-        run: |
-          audit_dir="$(mktemp -d "$RUNNER_TEMP/teagram-source-map-audit.XXXXXX")"
-          trap 'rm -rf "$audit_dir"' EXIT
-          pnpm exec vite build --outDir "$audit_dir"
-          env -u MTPROTO_TARGET_MODE -u MTPROTO_PRIVATE_ENDPOINT -u MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE \
-            pnpm run check-bundle -- "$audit_dir"
-
-      - name: Lint
-        run: pnpm run lint
 
       - name: Check out the local Teagram server for the worker sign-in smoke
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -272,10 +306,6 @@ jobs:
           TWEB_PRIVATE_AUTH_OUTPUT_DIR: ${{ runner.temp }}/custom-server-playwright-results/sign-in
         run: pnpm exec playwright test -c playwright.private-auth.config.ts e2e/customServerLocalSignIn.spec.ts --project=chromium --workers=1 --reporter=list,json --grep-invert 'creates a guest on the real custom server'
 
-      - name: Run standard auth browser smoke
-        if: success()
-        run: pnpm run test:standard-auth
-
       - name: Stop the local Teagram server
         if: always()
         shell: bash
@@ -309,8 +339,49 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Run reaction artwork browser regression
-        run: pnpm run test:reaction-artwork
+  check-web-source-map:
+    name: 'check: web-source-map'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.checkout_ref || github.sha }}
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0c17529a66aca453f9227af23103ed11469b1e47 # v4.0.0
+        with:
+          version: 11.16.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Read and validate the reviewed private target
+        id: target
+        run: node scripts/private-artifact-release.mjs write-target-outputs
+
+      - name: Audit default bindings in an isolated source-mapped build
+        env:
+          CI: 'true'
+          MTPROTO_TARGET_MODE: ${{ steps.target.outputs.mode }}
+          MTPROTO_PRIVATE_ENDPOINT: ${{ steps.target.outputs.endpoint }}
+          MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ steps.target.outputs.key_file }}
+          MTPROTO_SOURCE_MAP_AUDIT: '1'
+        run: |
+          audit_dir="$(mktemp -d "$RUNNER_TEMP/teagram-source-map-audit.XXXXXX")"
+          trap 'rm -rf "$audit_dir"' EXIT
+          pnpm exec vite build --outDir "$audit_dir"
+          env -u MTPROTO_TARGET_MODE -u MTPROTO_PRIVATE_ENDPOINT -u MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE \
+            pnpm run check-bundle -- "$audit_dir"
 
   check-deploy-workflow:
     name: 'check: deploy-workflow'
@@ -338,7 +409,7 @@ jobs:
       - name: Install yq
         run: go install github.com/mikefarah/yq/v4@v4.54.1
 
-      - name: Lint deployment and real-client workflows
+      - name: Lint repository workflows and scripts
         run: |
           "$(go env GOPATH)/bin/actionlint" -ignore 'label "ubuntu-26.04" is unknown' \
             .github/workflows/ci.yml \
@@ -350,6 +421,7 @@ jobs:
           bash -n .github/scripts/deploy-k8s-web.sh
           bash -n .github/scripts/start-k3d-cluster.sh
           bash -n .github/scripts/test-private-artifact-image.sh
+          bash -n .github/scripts/run-test-web-pool.sh
           bash -n .github/scripts/test-cloudflared-connector-contract.sh
           bash -n .github/scripts/test-deploy-k8s-web-rollback.sh
           node --check scripts/real-client/browser.cjs
@@ -805,6 +877,8 @@ jobs:
     if: always()
     needs:
       - test-web
+      - test-web-custom-server
+      - check-web-source-map
       - check-deploy-workflow
       - check-k8s-manifests
       - test-k8s-deploy

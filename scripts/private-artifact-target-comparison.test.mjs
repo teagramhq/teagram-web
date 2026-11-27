@@ -1,5 +1,5 @@
 import {execFileSync, spawnSync} from 'node:child_process';
-import {mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
+import {mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -362,18 +362,104 @@ describe('private artifact target comparison', () => {
     expect(checkoutStep).toContain('fetch-depth: 0');
   });
 
-  it('uses the reviewed private target only for the production bundle build', () => {
+  it('uses workflow-revision pool code while testing the reviewed private target', () => {
     const workflow = readFileSync(join(repositoryRoot, '.github/workflows/ci.yml'), 'utf8');
-    const testStep = workflow.split('      - name: Test, typecheck and prepare bundle\n')[1]?.split('\n      - name: ')[0];
+    const poolScriptCheckoutStep = workflow.split('      - name: Check out workflow revision for web checks\n')[1]?.split('\n      - name: ')[0];
+    const testStep = workflow.split('      - name: Run independent web checks in a three-worker pool\n')[1]?.split('\n      - name: ')[0];
     const buildStep = workflow.split('      - name: Build and audit production bundle\n')[1]?.split('\n      - name: ')[0];
+    const pool = readFileSync(join(repositoryRoot, '.github/scripts/run-test-web-pool.sh'), 'utf8');
 
     expect(workflow).toContain('node scripts/private-artifact-release.mjs write-target-outputs');
-    expect(testStep).toContain('run: pnpm test --run && pnpm run typecheck && pnpm run generate-changelog');
+    expect(poolScriptCheckoutStep).toContain('ref: ${{ github.workflow_sha }}');
+    expect(poolScriptCheckoutStep).toContain('path: .ci-workflow');
+    expect(poolScriptCheckoutStep).toContain('sparse-checkout: |');
+    expect(poolScriptCheckoutStep).toContain('.github/scripts/run-test-web-pool.sh');
+    expect(poolScriptCheckoutStep).toContain('sparse-checkout-cone-mode: false');
+    expect(testStep).toContain('working-directory: ${{ github.workspace }}');
+    expect(testStep).toContain('run: bash .ci-workflow/.github/scripts/run-test-web-pool.sh checks');
     expect(testStep).not.toContain('MTPROTO_');
+    expect(workflow).toContain('run: pnpm run generate-changelog');
     expect(buildStep).toContain('MTPROTO_TARGET_MODE: ${{ steps.target.outputs.mode }}');
     expect(buildStep).toContain('MTPROTO_PRIVATE_ENDPOINT: ${{ steps.target.outputs.endpoint }}');
     expect(buildStep).toContain('MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ steps.target.outputs.key_file }}');
     expect(buildStep).toContain('run: pnpm exec vite build && pnpm run check-bundle');
+    expect(pool).toContain('worker_limit=3');
+    expect(pool).toContain('stages=(unit-tests typecheck lint)');
+    expect(pool).toContain('pnpm test --run');
+    expect(pool).toContain('pnpm run typecheck');
+    expect(pool).toContain('wait -n || true');
+    expect(pool).toContain('sed -u');
+    expect(pool).not.toContain('sed --unbuffered');
+    expect(pool).toContain('::error title=test: web / %s::stage %s failed with exit code %s');
+    expect(workflow).toContain('      - test-web-custom-server\n');
+    expect(workflow).toContain('      - check-web-source-map\n');
+  });
+
+  it('reports a failed pool stage and exits unsuccessfully', () => {
+    const directory = temporaryDirectory();
+    const binDirectory = join(directory, 'bin');
+    const runnerTemp = join(directory, 'runner-temp');
+    const markerDirectory = join(directory, 'markers');
+    const callLog = join(directory, 'pnpm-calls.log');
+    const sourceCheckout = join(directory, 'source-checkout');
+    const fakePnpm = join(binDirectory, 'pnpm');
+
+    mkdirSync(binDirectory);
+    mkdirSync(markerDirectory);
+    mkdirSync(sourceCheckout);
+    const physicalSourceCheckout = realpathSync(sourceCheckout);
+    writeFileSync(fakePnpm, `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s|%s\\n' "$PWD" "$*" >> "$PNPM_CALL_LOG"
+case "$*" in
+  'test --run') stage=unit-tests ;;
+  'run typecheck') stage=typecheck ;;
+  'run lint') stage=lint ;;
+  *) exit 99 ;;
+esac
+: > "$PNPM_STAGE_MARKERS/$stage"
+for _ in {1..200}; do
+  if [[ -f "$PNPM_STAGE_MARKERS/unit-tests" && -f "$PNPM_STAGE_MARKERS/typecheck" && -f "$PNPM_STAGE_MARKERS/lint" ]]; then
+    printf 'all three stages started\\n'
+    break
+  fi
+  sleep 0.05
+done
+if [[ ! -f "$PNPM_STAGE_MARKERS/unit-tests" || ! -f "$PNPM_STAGE_MARKERS/typecheck" || ! -f "$PNPM_STAGE_MARKERS/lint" ]]; then
+  printf 'pool stages did not overlap\\n' >&2
+  exit 93
+fi
+if [[ "$stage" == unit-tests ]]; then
+  printf 'intentional unit test failure\\n' >&2
+  exit 17
+fi
+`);
+    execFileSync('chmod', ['+x', fakePnpm]);
+
+    const result = spawnSync('bash', [join(repositoryRoot, '.github/scripts/run-test-web-pool.sh'), 'checks'], {
+      cwd: sourceCheckout,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${binDirectory}:${process.env.PATH}`,
+        PNPM_CALL_LOG: callLog,
+        PNPM_STAGE_MARKERS: markerDirectory,
+        RUNNER_TEMP: runnerTemp
+      }
+    });
+
+    expect(result.status).toBe(1);
+    const output = result.stdout + result.stderr;
+    expect(output).toContain('::error title=test: web / unit-tests::stage unit-tests failed with exit code 17');
+    expect(output).toContain('[unit-tests] all three stages started');
+    expect(output).toContain('[typecheck] all three stages started');
+    expect(output).toContain('[lint] all three stages started');
+    expect(readdirSync(markerDirectory).sort()).toEqual(['lint', 'typecheck', 'unit-tests']);
+    expect(readFileSync(callLog, 'utf8').trim().split('\n')).toEqual(expect.arrayContaining([
+      `${physicalSourceCheckout}|test --run`,
+      `${physicalSourceCheckout}|run typecheck`,
+      `${physicalSourceCheckout}|run lint`
+    ]));
   });
 
   it('runs the source-map default-binding audit outside the deploy artifact path', () => {
@@ -381,8 +467,9 @@ describe('private artifact target comparison', () => {
     const auditStep = workflow.split('      - name: Audit default bindings in an isolated source-mapped build\n')[1]
     ?.split('\n      - name: ')[0];
 
-    expect(auditStep).toContain("CI: 'true'");
-    expect(auditStep).toContain("MTPROTO_SOURCE_MAP_AUDIT: '1'");
+    expect(workflow).toContain('name: \'check: web-source-map\'');
+    expect(auditStep).toContain('CI: \'true\'');
+    expect(auditStep).toContain('MTPROTO_SOURCE_MAP_AUDIT: \'1\'');
     expect(auditStep).toContain('mktemp -d "$RUNNER_TEMP/teagram-source-map-audit.XXXXXX"');
     expect(auditStep).toContain('pnpm exec vite build --outDir "$audit_dir"');
     expect(auditStep).toContain('trap \'rm -rf "$audit_dir"\' EXIT');
