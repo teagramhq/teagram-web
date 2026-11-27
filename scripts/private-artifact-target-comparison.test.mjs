@@ -364,16 +364,26 @@ describe('private artifact target comparison', () => {
 
   it('uses the reviewed private target only for the production bundle build', () => {
     const workflow = readFileSync(join(repositoryRoot, '.github/workflows/ci.yml'), 'utf8');
-    const testStep = workflow.split('      - name: Test, typecheck and prepare bundle\n')[1]?.split('\n      - name: ')[0];
+    const testStep = workflow.split('      - name: Run independent web checks in a three-worker pool\n')[1]?.split('\n      - name: ')[0];
     const buildStep = workflow.split('      - name: Build and audit production bundle\n')[1]?.split('\n      - name: ')[0];
+    const pool = readFileSync(join(repositoryRoot, '.github/scripts/run-test-web-pool.sh'), 'utf8');
 
     expect(workflow).toContain('node scripts/private-artifact-release.mjs write-target-outputs');
-    expect(testStep).toContain('run: pnpm test --run && pnpm run typecheck && pnpm run generate-changelog');
+    expect(testStep).toContain('run: bash .github/scripts/run-test-web-pool.sh checks');
     expect(testStep).not.toContain('MTPROTO_');
+    expect(workflow).toContain('run: pnpm run generate-changelog');
     expect(buildStep).toContain('MTPROTO_TARGET_MODE: ${{ steps.target.outputs.mode }}');
     expect(buildStep).toContain('MTPROTO_PRIVATE_ENDPOINT: ${{ steps.target.outputs.endpoint }}');
     expect(buildStep).toContain('MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ steps.target.outputs.key_file }}');
     expect(buildStep).toContain('run: pnpm exec vite build && pnpm run check-bundle');
+    expect(pool).toContain('worker_limit=3');
+    expect(pool).toContain('stages=(unit-tests typecheck lint)');
+    expect(pool).toContain('pnpm test --run');
+    expect(pool).toContain('pnpm run typecheck');
+    expect(pool).toContain('wait -n || true');
+    expect(pool).toContain('::error title=test: web / %s::stage %s failed with exit code %s');
+    expect(workflow).toContain('      - test-web-custom-server\n');
+    expect(workflow).toContain('      - check-web-source-map\n');
   });
 
   it('runs the source-map default-binding audit outside the deploy artifact path', () => {
@@ -381,6 +391,7 @@ describe('private artifact target comparison', () => {
     const auditStep = workflow.split('      - name: Audit default bindings in an isolated source-mapped build\n')[1]
     ?.split('\n      - name: ')[0];
 
+    expect(workflow).toContain("name: 'check: web-source-map'");
     expect(auditStep).toContain("CI: 'true'");
     expect(auditStep).toContain("MTPROTO_SOURCE_MAP_AUDIT: '1'");
     expect(auditStep).toContain('mktemp -d "$RUNNER_TEMP/teagram-source-map-audit.XXXXXX"');
