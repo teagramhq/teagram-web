@@ -43,6 +43,9 @@ jobs:
         with:
           ref: ${{ github.workflow_sha }}
           path: .ci-workflow
+          sparse-checkout: |
+            .github/scripts/run-test-web-pool.sh
+          sparse-checkout-cone-mode: false
           persist-credentials: false
 
       - name: Set up pnpm

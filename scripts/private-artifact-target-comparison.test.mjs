@@ -372,6 +372,9 @@ describe('private artifact target comparison', () => {
     expect(workflow).toContain('node scripts/private-artifact-release.mjs write-target-outputs');
     expect(poolScriptCheckoutStep).toContain('ref: ${{ github.workflow_sha }}');
     expect(poolScriptCheckoutStep).toContain('path: .ci-workflow');
+    expect(poolScriptCheckoutStep).toContain('sparse-checkout: |');
+    expect(poolScriptCheckoutStep).toContain('.github/scripts/run-test-web-pool.sh');
+    expect(poolScriptCheckoutStep).toContain('sparse-checkout-cone-mode: false');
     expect(testStep).toContain('working-directory: ${{ github.workspace }}');
     expect(testStep).toContain('run: bash .ci-workflow/.github/scripts/run-test-web-pool.sh checks');
     expect(testStep).not.toContain('MTPROTO_');
