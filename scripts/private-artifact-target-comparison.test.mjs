@@ -1,5 +1,5 @@
 import {execFileSync, spawnSync} from 'node:child_process';
-import {mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
+import {mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -390,14 +390,34 @@ describe('private artifact target comparison', () => {
     const directory = temporaryDirectory();
     const binDirectory = join(directory, 'bin');
     const runnerTemp = join(directory, 'runner-temp');
+    const markerDirectory = join(directory, 'markers');
     const callLog = join(directory, 'pnpm-calls.log');
     const fakePnpm = join(binDirectory, 'pnpm');
 
     mkdirSync(binDirectory);
+    mkdirSync(markerDirectory);
     writeFileSync(fakePnpm, `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\\n' "$*" >> "$PNPM_CALL_LOG"
-if [[ "$1 $2" == "test --run" ]]; then
+case "$*" in
+  'test --run') stage=unit-tests ;;
+  'run typecheck') stage=typecheck ;;
+  'run lint') stage=lint ;;
+  *) exit 99 ;;
+esac
+: > "$PNPM_STAGE_MARKERS/$stage"
+for _ in {1..200}; do
+  if [[ -f "$PNPM_STAGE_MARKERS/unit-tests" && -f "$PNPM_STAGE_MARKERS/typecheck" && -f "$PNPM_STAGE_MARKERS/lint" ]]; then
+    printf 'all three stages started\\n'
+    break
+  fi
+  sleep 0.05
+done
+if [[ ! -f "$PNPM_STAGE_MARKERS/unit-tests" || ! -f "$PNPM_STAGE_MARKERS/typecheck" || ! -f "$PNPM_STAGE_MARKERS/lint" ]]; then
+  printf 'pool stages did not overlap\\n' >&2
+  exit 93
+fi
+if [[ "$stage" == unit-tests ]]; then
   printf 'intentional unit test failure\\n' >&2
   exit 17
 fi
@@ -411,12 +431,18 @@ fi
         ...process.env,
         PATH: `${binDirectory}:${process.env.PATH}`,
         PNPM_CALL_LOG: callLog,
+        PNPM_STAGE_MARKERS: markerDirectory,
         RUNNER_TEMP: runnerTemp
       }
     });
 
     expect(result.status).toBe(1);
-    expect(result.stdout + result.stderr).toContain('::error title=test: web / unit-tests::stage unit-tests failed with exit code 17');
+    const output = result.stdout + result.stderr;
+    expect(output).toContain('::error title=test: web / unit-tests::stage unit-tests failed with exit code 17');
+    expect(output).toContain('[unit-tests] all three stages started');
+    expect(output).toContain('[typecheck] all three stages started');
+    expect(output).toContain('[lint] all three stages started');
+    expect(readdirSync(markerDirectory).sort()).toEqual(['lint', 'typecheck', 'unit-tests']);
     expect(readFileSync(callLog, 'utf8').trim().split('\n')).toEqual(expect.arrayContaining([
       'test --run',
       'run typecheck',

@@ -40,7 +40,7 @@ run_stage() {
   local result_file="$stage_dir/$stage.exit"
   local status
 
-  if run_stage_command "$stage" >"$log_file" 2>&1; then
+  if run_stage_command "$stage" 2>&1 | tee "$log_file" | sed --unbuffered "s/^/[$stage] /"; then
     status=0
   else
     status=$?
@@ -61,7 +61,6 @@ wait || true
 
 failed=0
 for stage in "${stages[@]}"; do
-  log_file="$stage_dir/$stage.log"
   result_file="$stage_dir/$stage.exit"
   if [[ -f "$result_file" ]]; then
     status="$(<"$result_file")"
@@ -70,9 +69,6 @@ for stage in "${stages[@]}"; do
   fi
 
   printf '::group::test: web / %s (exit %s)\n' "$stage" "$status"
-  if [[ -f "$log_file" ]]; then
-    cat "$log_file"
-  fi
   printf '::endgroup::\n'
 
   if [[ "$status" != 0 ]]; then
