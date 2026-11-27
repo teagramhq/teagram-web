@@ -1,5 +1,5 @@
 import {execFileSync, spawnSync} from 'node:child_process';
-import {mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
+import {mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -407,6 +407,7 @@ describe('private artifact target comparison', () => {
     mkdirSync(binDirectory);
     mkdirSync(markerDirectory);
     mkdirSync(sourceCheckout);
+    const physicalSourceCheckout = realpathSync(sourceCheckout);
     writeFileSync(fakePnpm, `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s|%s\\n' "$PWD" "$*" >> "$PNPM_CALL_LOG"
@@ -455,9 +456,9 @@ fi
     expect(output).toContain('[lint] all three stages started');
     expect(readdirSync(markerDirectory).sort()).toEqual(['lint', 'typecheck', 'unit-tests']);
     expect(readFileSync(callLog, 'utf8').trim().split('\n')).toEqual(expect.arrayContaining([
-      `${sourceCheckout}|test --run`,
-      `${sourceCheckout}|run typecheck`,
-      `${sourceCheckout}|run lint`
+      `${physicalSourceCheckout}|test --run`,
+      `${physicalSourceCheckout}|run typecheck`,
+      `${physicalSourceCheckout}|run lint`
     ]));
   });
 
@@ -466,9 +467,9 @@ fi
     const auditStep = workflow.split('      - name: Audit default bindings in an isolated source-mapped build\n')[1]
     ?.split('\n      - name: ')[0];
 
-    expect(workflow).toContain("name: 'check: web-source-map'");
-    expect(auditStep).toContain("CI: 'true'");
-    expect(auditStep).toContain("MTPROTO_SOURCE_MAP_AUDIT: '1'");
+    expect(workflow).toContain('name: \'check: web-source-map\'');
+    expect(auditStep).toContain('CI: \'true\'');
+    expect(auditStep).toContain('MTPROTO_SOURCE_MAP_AUDIT: \'1\'');
     expect(auditStep).toContain('mktemp -d "$RUNNER_TEMP/teagram-source-map-audit.XXXXXX"');
     expect(auditStep).toContain('pnpm exec vite build --outDir "$audit_dir"');
     expect(auditStep).toContain('trap \'rm -rf "$audit_dir"\' EXIT');
