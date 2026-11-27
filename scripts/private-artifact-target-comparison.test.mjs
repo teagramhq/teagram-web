@@ -386,6 +386,44 @@ describe('private artifact target comparison', () => {
     expect(workflow).toContain('      - check-web-source-map\n');
   });
 
+  it('reports a failed pool stage and exits unsuccessfully', () => {
+    const directory = temporaryDirectory();
+    const binDirectory = join(directory, 'bin');
+    const runnerTemp = join(directory, 'runner-temp');
+    const callLog = join(directory, 'pnpm-calls.log');
+    const fakePnpm = join(binDirectory, 'pnpm');
+
+    mkdirSync(binDirectory);
+    writeFileSync(fakePnpm, `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$PNPM_CALL_LOG"
+if [[ "$1 $2" == "test --run" ]]; then
+  printf 'intentional unit test failure\\n' >&2
+  exit 17
+fi
+`);
+    execFileSync('chmod', ['+x', fakePnpm]);
+
+    const result = spawnSync('bash', [join(repositoryRoot, '.github/scripts/run-test-web-pool.sh'), 'checks'], {
+      cwd: repositoryRoot,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${binDirectory}:${process.env.PATH}`,
+        PNPM_CALL_LOG: callLog,
+        RUNNER_TEMP: runnerTemp
+      }
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout + result.stderr).toContain('::error title=test: web / unit-tests::stage unit-tests failed with exit code 17');
+    expect(readFileSync(callLog, 'utf8').trim().split('\n')).toEqual(expect.arrayContaining([
+      'test --run',
+      'run typecheck',
+      'run lint'
+    ]));
+  });
+
   it('runs the source-map default-binding audit outside the deploy artifact path', () => {
     const workflow = readFileSync(join(repositoryRoot, '.github/workflows/ci.yml'), 'utf8');
     const auditStep = workflow.split('      - name: Audit default bindings in an isolated source-mapped build\n')[1]
