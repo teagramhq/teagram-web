@@ -424,10 +424,6 @@ fi
     ]));
   });
 
-  it('intentional CI failure proof 2026-11-27', () => {
-    expect(true).toBe(false);
-  });
-
   it('runs the source-map default-binding audit outside the deploy artifact path', () => {
     const workflow = readFileSync(join(repositoryRoot, '.github/workflows/ci.yml'), 'utf8');
     const auditStep = workflow.split('      - name: Audit default bindings in an isolated source-mapped build\n')[1]
