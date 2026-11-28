@@ -63,6 +63,7 @@ describe('custom server discovery', () => {
     expect(defaultBootstrapSources).toContain('https://server.teagram.io');
     expect(defaultBootstrapSources).toContain('wss:');
     expect(defaultBootstrapSources).not.toContain('wss://web.teagram.io');
+    expect(getServerConnectSources('demo.example')).toContain('wss://demo.example');
     expect(getServerConnectSources('demo.example', {
       mode: 'private',
       endpoint: 'wss://demo.example:2443/apiws'

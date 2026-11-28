@@ -122,12 +122,13 @@ export function shouldPromptForServerSelection(host: string, savedChoice?: strin
 
 export function getServerConnectSources(host: string, target?: MtprotoTarget) {
   const httpsOrigin = `https://${host}`;
+  const websocketOrigin = httpsOrigin.replace('https:', 'wss:');
   const isDefaultServerBootstrap = !target && isServerSelectionOrigin(host);
 
   const sources = ['\u0027self\u0027'];
   if(httpsOrigin !== location.origin) sources.push(httpsOrigin);
   if(target?.mode === 'private') sources.push(target.endpoint);
-  else sources.push(isDefaultServerBootstrap ? 'wss:' : `wss://${host}`);
+  else sources.push(isDefaultServerBootstrap ? 'wss:' : websocketOrigin);
   // The server endpoint is unknown until discovery, so bootstrap allows it briefly and narrows after discovery.
   sources.push(isDefaultServerBootstrap ? `https://${DEFAULT_SERVER_DISCOVERY_HOST}` : TELEGRAM_BOT_API_ORIGIN);
   return sources;
