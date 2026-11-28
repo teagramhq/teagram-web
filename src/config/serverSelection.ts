@@ -14,6 +14,7 @@ const SERVER_PINS_LOCK = 'teagram.server-pins.v1';
 export const DEFAULT_SERVER_HOST = 'web.teagram.io';
 const DEFAULT_SERVER_DISCOVERY_HOST = 'server.teagram.io';
 export const DEMO_SERVER_HOST = 'demo.teagram.io';
+const DISCOVERY_TOO_LARGE = 'not a Teagram server: discovery document is too large';
 export const DISCOVERY_MAX_BYTES = 16 * 1024;
 export const DISCOVERY_TIMEOUT_MS = 8000;
 
@@ -328,14 +329,13 @@ export async function validateDiscoveryDocument(hostInput: string, value: unknow
 
 export async function fetchServerDiscovery(hostInput: string, fetcher: typeof fetch = fetch, signal?: AbortSignal): Promise<DiscoveredServer> {
   const host = normalizeServerHost(hostInput);
-  const discoveryHost = isServerSelectionOrigin(host) ? DEFAULT_SERVER_DISCOVERY_HOST : host;
   const controller = new AbortController();
   const abort = () => controller.abort();
   if(signal?.aborted) controller.abort();
   else signal?.addEventListener('abort', abort, {once: true});
   const timer = setTimeout(() => controller.abort(), DISCOVERY_TIMEOUT_MS);
   try {
-    const response = await fetcher(`https://${discoveryHost}/.well-known/teagramd/client`, {
+    const response = await fetcher(`https://${isServerSelectionOrigin(host) ? DEFAULT_SERVER_DISCOVERY_HOST : host}/.well-known/teagramd/client`, {
       redirect: 'error',
       credentials: 'omit',
       signal: controller.signal,
@@ -344,7 +344,7 @@ export async function fetchServerDiscovery(hostInput: string, fetcher: typeof fe
     if(!response.ok) throw new Error(`Server discovery failed (${response.status})`);
     const declaredLength = Number(response.headers.get('content-length'));
     if(Number.isFinite(declaredLength) && declaredLength > DISCOVERY_MAX_BYTES) {
-      throw new Error('not a Teagram server: discovery document is too large');
+      throw new Error(DISCOVERY_TOO_LARGE);
     }
 
     const reader = response.body?.getReader();
@@ -357,7 +357,7 @@ export async function fetchServerDiscovery(hostInput: string, fetcher: typeof fe
       size += value.byteLength;
       if(size > DISCOVERY_MAX_BYTES) {
         await reader.cancel();
-        throw new Error('not a Teagram server: discovery document is too large');
+        throw new Error(DISCOVERY_TOO_LARGE);
       }
       chunks.push(value);
     }
