@@ -4,6 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 deploy_script="$repo_root/.github/scripts/deploy-k8s-web.sh"
 real_jq="$(command -v jq)"
+real_sleep="$(command -v sleep)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -13,15 +14,20 @@ fail() {
 }
 
 run_case() {
-  local case_name="$1" expected_failure="$2"
+  local case_name="$1" expected_failure="$2" expected_result="${3:-failure}"
+  local verification_route=public verification_label=rollout smoke_url='http://127.0.0.1:18080/'
   local log="$tmp/$case_name.log" output="$tmp/$case_name.output"
   local bin="$tmp/$case_name-bin" manifest="$tmp/$case_name.yaml"
   local script_status=0
   local -a run_deploy=(bash)
+  if [[ "$case_name" == fallback_* ]]; then
+    verification_route=fallback
+    verification_label=fallback
+  fi
   if [[ "$expected_failure" == jq-* ]]; then
     run_deploy=(timeout --kill-after=2s 12s bash)
   fi
-  mkdir -p "$bin"
+  mkdir -p "$bin" "$tmp/$case_name-runner-temp"
   printf 'image: %s\n' "$deploy_image" >"$manifest"
 
   cat >"$bin/kubectl" <<'SH'
@@ -51,10 +57,19 @@ case "$1 $2" in
     fi
     ;;
   'rollout undo')
+    if [[ "${TEST_FAILURE:-}" == fallback-probe && ! -f "$PORT_FORWARD_CLEANUP_FILE" ]]; then
+      echo 'port-forward was not cleaned up before rollback' >&2
+      exit 1
+    fi
     : >"$ROLLBACK_STARTED_FILE"
     if [[ "${TEST_FAILURE:-}" == undo ]]; then
       exit 1
     fi
+    ;;
+  'port-forward --address')
+    printf '%s\n' "$$" >"$PORT_FORWARD_PID_FILE"
+    trap 'printf cleaned >"$PORT_FORWARD_CLEANUP_FILE"; exit 0' TERM INT
+    while :; do read -r -t 1 _ || true; done
     ;;
   'apply --dry-run=server') ;;
   'apply --filename')
@@ -112,6 +127,23 @@ JSON
     ;;
 esac
 SH
+  cat >"$bin/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'curl %s\n' "$*" >>"$KUBECTL_LOG"
+if [[ "${TEST_FAILURE:-}" == fallback-probe ]]; then
+  exit 22
+fi
+printf 'ok'
+SH
+  cat >"$bin/sleep" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${TEST_FAILURE:-}" == fallback-probe ]]; then
+  exit 0
+fi
+exec "$REAL_SLEEP" "$@"
+SH
   cat >"$bin/jq" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -130,24 +162,41 @@ SH
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'node %s\n' "$*" >>"$KUBECTL_LOG"
+if [[ "${TEST_FAILURE:-}" == fallback-ready ]]; then
+  exit 0
+fi
 exit 1
 SH
-  chmod +x "$bin/kubectl" "$bin/jq" "$bin/node"
+  chmod +x "$bin/kubectl" "$bin/curl" "$bin/sleep" "$bin/jq" "$bin/node"
 
   if PATH="$bin:$PATH" \
     KUBECTL_LOG="$log" \
+    RUNNER_TEMP="$tmp/$case_name-runner-temp" \
     STATUS_COUNT_FILE="$tmp/$case_name-status-count" \
     GET_COUNT_FILE="$tmp/$case_name-get-count" \
     ROLLBACK_STARTED_FILE="$tmp/$case_name-rollback-started" \
-    REAL_JQ="$real_jq" \
+    PORT_FORWARD_PID_FILE="$tmp/$case_name-port-forward-pid" \
+    PORT_FORWARD_CLEANUP_FILE="$tmp/$case_name-port-forward-cleanup" \
+    REAL_JQ="$real_jq" REAL_SLEEP="$real_sleep" \
     JQ_PID_FILE="$tmp/$case_name-jq-pid" \
     KUBECTL_PID_FILE="$tmp/$case_name-kubectl-pid" \
     OLD_IMAGE="$old_image" DEPLOY_IMAGE="$deploy_image" TEST_FAILURE="$expected_failure" \
+    VERIFY_ROUTE="$verification_route" VERIFY_LABEL="$verification_label" \
     "${run_deploy[@]}" "$deploy_script" "$manifest" "$deploy_sha" "$artifact_digest" "$deploy_image" \
-      http://127.0.0.1:18080/ >"$output" 2>&1; then
-    fail "$case_name unexpectedly succeeded"
+      "$smoke_url" >"$output" 2>&1; then
+    script_status=0
   else
     script_status=$?
+  fi
+
+  if [[ "$expected_result" == success ]]; then
+    [[ "$script_status" == 0 ]] || {
+      cat "$output" >&2
+      cat "$log" >&2
+      fail "$case_name failed with exit status $script_status"
+    }
+  else
+    [[ "$script_status" != 0 ]] || fail "$case_name unexpectedly succeeded"
   fi
 
   if [[ "$expected_failure" == signal && "$script_status" != 143 ]]; then
@@ -172,6 +221,45 @@ SH
     done
     [[ "$script_status" == 1 ]] || fail "$case_name did not bound the stalled JSON filter (exit $script_status)"
     [[ "$live_diagnostic" == false ]] || fail "$case_name left a diagnostic process running"
+  fi
+
+  if [[ "$case_name" == fallback_* ]]; then
+    grep -Fqx 'port-forward --address 127.0.0.1 --namespace teagram service/teagram-web 18080:80' "$log" ||
+      fail "$case_name did not start the service port-forward"
+    grep -Fq "/healthz?deploy=$deploy_sha" "$log" || fail "$case_name did not probe the fallback health route"
+    [[ -f "$tmp/$case_name-port-forward-pid" ]] || fail "$case_name did not record the port-forward process"
+    [[ -f "$tmp/$case_name-port-forward-cleanup" ]] || fail "$case_name did not clean up the port-forward process"
+    local port_forward_pid process_state
+    read -r port_forward_pid <"$tmp/$case_name-port-forward-pid"
+    process_state="$(ps -o stat= -p "$port_forward_pid" || true)"
+    process_state="${process_state//[[:space:]]/}"
+    if [[ -n "$process_state" && "$process_state" != Z* ]]; then
+      kill "$port_forward_pid" 2>/dev/null || true
+      fail "$case_name left the port-forward process running"
+    fi
+
+    if [[ "$expected_result" == success ]]; then
+      grep -Fqx "fallback=verified sha=$deploy_sha" "$output" ||
+        fail "$case_name did not print the fallback verification marker"
+      if grep -Fq 'rollout=verified sha=' "$output"; then
+        fail "$case_name printed the public rollout marker for a fallback probe"
+      fi
+      grep -Fqx "node .github/scripts/smoke-k8s-web.mjs $smoke_url $deploy_sha $artifact_digest" "$log" ||
+        fail "$case_name did not run the deployment smoke against the fallback service"
+      if grep -Fq 'rollout undo deployment/teagram-web' "$log"; then
+        fail "$case_name rolled back after a successful fallback smoke"
+      fi
+      return 0
+    fi
+
+    grep -Fq 'the fallback route did not become ready' "$output" ||
+      fail "$case_name did not report the failed fallback readiness probe"
+    if grep -Fq 'fallback=verified sha=' "$output"; then
+      fail "$case_name printed the fallback verification marker after a failed probe"
+    fi
+    if grep -Eq '^node ' "$log"; then
+      fail "$case_name ran the web smoke after a failed readiness probe"
+    fi
   fi
 
   if [[ "$expected_failure" == rollout || "$expected_failure" == diagnostics || "$expected_failure" == events || "$expected_failure" == timeout || "$expected_failure" == jq-* ]]; then
@@ -245,5 +333,7 @@ run_case rollout rollout
 run_case diagnostics diagnostics
 run_case events events
 run_case timeout timeout
+run_case fallback_ready fallback-ready success
+run_case fallback_probe fallback-probe
 
 printf 'k3s web deployment rollback behavior holds\n'
