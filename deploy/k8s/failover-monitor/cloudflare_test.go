@@ -65,6 +65,25 @@ func TestCloudflareRequestPreservesTransportCause(t *testing.T) {
 	}
 }
 
+func TestCloudflarePatchHTTPRejectionIsDefinitive(t *testing.T) {
+	config := testConfig()
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	client := NewCloudflareClient(config, "test-only-token")
+	client.baseURL = server.URL
+	client.client = server.Client()
+	_, err := client.PatchTarget(context.Background(), config.TunnelTarget)
+	if got := safeFailureCause(err); got != "cloudflare_http_status_403" {
+		t.Fatalf("safe cause = %q, want cloudflare_http_status_403", got)
+	}
+	if !isDefinitivePatchRejection(err) {
+		t.Fatalf("HTTP 403 PATCH error is not classified as definitive: %v", err)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (roundTrip roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {

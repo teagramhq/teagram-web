@@ -95,16 +95,16 @@ record and the saved journal:
 
 ```sh
 kubectl scale deployment web-failover-monitor -n web-failover --replicas=0
-kubectl get configmap web-failover-state -n web-failover -o yaml \
-  > ./web-failover-state-backup.yaml
 kubectl get configmap web-failover-state -n web-failover \
-  -o jsonpath='{.data.state\.json}'
+  -o jsonpath='{.data.state\.json}' > ./web-failover-state-backup.json
 kubectl edit configmap web-failover-state -n web-failover
 ```
 
-The YAML copy is the rollback for a bad manual edit; restore it with
-`kubectl apply -f ./web-failover-state-backup.yaml` while the monitor remains
-scaled to zero.
+The JSON file backs up only the runtime state. To undo a bad manual edit while
+the monitor remains scaled to zero, run `kubectl edit configmap web-failover-state -n web-failover`
+again and restore only `data.state.json` from the backup file.
+Do not reapply a saved ConfigMap object: its old `metadata.resourceVersion` can
+conflict with the current object version.
 
 Edit `data.state.json` only after verifying the record ID, name, type, proxy
 setting, and live target. If the record is at `pending.to` and Cloudflare's

@@ -78,6 +78,9 @@ func (client *CloudflareClient) request(ctx context.Context, method string, body
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode > 299 {
+		if method == http.MethodPatch && response.StatusCode >= 400 && response.StatusCode < 500 {
+			return DNSRecord{}, safePatchRejection(fmt.Sprintf("cloudflare_http_status_%d", response.StatusCode))
+		}
 		return DNSRecord{}, safeDiagnostic(fmt.Sprintf("cloudflare_http_status_%d", response.StatusCode))
 	}
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 64*1024+1))
@@ -95,6 +98,9 @@ func (client *CloudflareClient) request(ctx context.Context, method string, body
 		return DNSRecord{}, safeDiagnostic("cloudflare_invalid_response")
 	}
 	if !envelope.Success {
+		if method == http.MethodPatch {
+			return DNSRecord{}, safePatchRejection("cloudflare_rejected_request")
+		}
 		return DNSRecord{}, safeDiagnostic("cloudflare_rejected_request")
 	}
 	return envelope.Result, nil

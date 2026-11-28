@@ -420,6 +420,9 @@ func (controller *Controller) switchTo(ctx context.Context, target, reason strin
 	updatedRecord, err := controller.recordClient.PatchTarget(ctx, target)
 	if err != nil {
 		controller.recordSafe = false
+		if isDefinitivePatchRejection(err) {
+			controller.pendingPatchAttempted = false
+		}
 		controller.alert("record_patch_failed", messageWithSafeCause("Cloudflare refused the DNS record update", err))
 		return
 	}

@@ -8,8 +8,9 @@ import (
 )
 
 type safeDiagnosticError struct {
-	detail string
-	cause  error
+	detail                   string
+	cause                    error
+	definitivePatchRejection bool
 }
 
 func (err safeDiagnosticError) Error() string {
@@ -24,12 +25,25 @@ func (err safeDiagnosticError) Unwrap() error {
 	return err.cause
 }
 
+func (err safeDiagnosticError) DefinitivePatchRejection() bool {
+	return err.definitivePatchRejection
+}
+
 func safeDiagnostic(detail string) error {
 	return safeDiagnosticError{detail: detail}
 }
 
+func safePatchRejection(detail string) error {
+	return safeDiagnosticError{detail: detail, definitivePatchRejection: true}
+}
+
 func safeDiagnosticWrap(detail string, cause error) error {
 	return safeDiagnosticError{detail: detail, cause: cause}
+}
+
+func isDefinitivePatchRejection(err error) bool {
+	var rejection interface{ DefinitivePatchRejection() bool }
+	return errors.As(err, &rejection) && rejection.DefinitivePatchRejection()
 }
 
 func safeFailureCause(err error) string {

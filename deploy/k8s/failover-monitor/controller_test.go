@@ -489,6 +489,40 @@ func TestPatchErrorThatAppliedTransitionRecoversOnRevalidation(t *testing.T) {
 	}
 }
 
+func TestRejectedPatchDoesNotRecoverFromOperatorEdit(t *testing.T) {
+	config := testConfig()
+	config.WritesEnabled = true
+	state := &memoryStateStore{state: PersistentState{Target: config.PagesTarget}}
+	client := &mutableRecordClient{
+		record:      testRecord(config, config.PagesTarget),
+		patchErrors: []error{safePatchRejection("cloudflare_http_status_403")},
+	}
+	var logs bytes.Buffer
+	controller, err := NewController(context.Background(), config, client, state, log.New(&logs, "", 0), NewMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	for attempt := 0; attempt < 3; attempt++ {
+		controller.observe(context.Background(), start.Add(time.Duration(attempt)*probeInterval), errors.New("probe failed"))
+	}
+	if client.record.Content != config.PagesTarget || !controller.SafetyLocked() {
+		t.Fatalf("rejected PATCH changed the target or unlocked writes: record=%q locked=%t", client.record.Content, controller.SafetyLocked())
+	}
+	if state.state.Pending == nil || state.state.Pending.PatchVerified {
+		t.Fatalf("rejected PATCH did not leave an unverified journal entry: %#v", state.state)
+	}
+
+	client.record.Content = config.TunnelTarget
+	controller.retryRecordValidation(context.Background())
+	if !controller.SafetyLocked() || controller.recordSafe || state.state.Pending == nil || state.state.Pending.PatchVerified {
+		t.Fatalf("operator edit was trusted as a rejected PATCH: locked=%t recordSafe=%t state=%#v logs=%s", controller.SafetyLocked(), controller.recordSafe, state.state, logs.String())
+	}
+	if !strings.Contains(logs.String(), "event=pending_state_unsubmitted") {
+		t.Fatalf("rejected PATCH followed by an operator edit was not reported: %s", logs.String())
+	}
+}
+
 func TestPendingSaveThatPersistsBeforeErrorRecoversAndRestarts(t *testing.T) {
 	config := testConfig()
 	config.WritesEnabled = true
