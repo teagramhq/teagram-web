@@ -1144,6 +1144,87 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
   }
 });
 
+test('private artifact boots a configured default server without blocking discovery', async({browser}, testInfo) => {
+  test.skip(testInfo.project.name !== 'private-artifact-chromium', 'requires Chromium host resolution');
+  const manifest = JSON.parse(readFileSync(resolve('dist/mtproto-target.json'), 'utf8')) as {mode: string};
+  if(manifest.mode !== 'private') throw new Error('private artifact browser test requires a private build');
+
+  const appBaseUrl = new URL(testInfo.project.use.baseURL as string);
+  const appPort = Number(appBaseUrl.port);
+  const appOrigin = `https://${APP_HOST}`;
+  const websocketEndpoint = `wss://${DEFAULT_DISCOVERY_HOST}/apiws`;
+  const rsaPublicKey = createPublicKey(readFileSync(resolve('scripts/fixtures/private-mtproto-public.pem')));
+  const discovery = {
+    version: 1,
+    mtproto: {
+      endpoint: `${DEFAULT_DISCOVERY_HOST}:443`,
+      dc_id: 2,
+      rsa_spki: rsaPublicKey.export({format: 'der', type: 'spki'}).toString('base64')
+    },
+    websocket: {endpoint: websocketEndpoint}
+  };
+  const discoveryRequests: Array<{host: string, path: string}> = [];
+  const cspViolations: string[] = [];
+  const edgeProxy = await startTeagramEdgeProxy({
+    appPort,
+    appProxyHost: 'localhost',
+    appProxyHosts: [APP_HOST],
+    cspForAppResponse: (url) => url.pathname === '/',
+    directoryPrefix: 'teagram-private-artifact-configured-default-',
+    hostnames: [APP_HOST, DEFAULT_DISCOVERY_HOST],
+    onDiscovery: (host, url, response) => {
+      if(host !== DEFAULT_DISCOVERY_HOST) return false;
+      discoveryRequests.push({host, path: url.pathname});
+      response.writeHead(200, {
+        'access-control-allow-origin': '*',
+        'content-type': 'application/json'
+      });
+      response.end(JSON.stringify(discovery));
+      return true;
+    },
+    onUpgrade: (request, socket, head, webSocketServer) => {
+      if(request.headers.host?.replace(/:\d+$/, '') !== DEFAULT_DISCOVERY_HOST || request.url !== '/apiws') {
+        socket.destroy();
+        return;
+      }
+      webSocketServer.handleUpgrade(request, socket, head, (client) => {
+        client.on('error', () => {});
+      });
+    }
+  });
+
+  const context = await browser.newContext({ignoreHTTPSErrors: true});
+  try {
+    await context.route('**/teagram-config.json', (route) => route.fulfill({json: {server: APP_HOST, autoGuest: false}}));
+    await context.addInitScript(() => {
+      const violations: string[] = [];
+      (window as any).__cspViolations = violations;
+      document.addEventListener('securitypolicyviolation', (event) => {
+        if(event.effectiveDirective === 'connect-src') violations.push(event.blockedURI);
+      });
+    });
+    const page = await context.newPage();
+    page.on('console', (message) => {
+      if(message.type() === 'error' && /violates the following directive|Refused to .* because it violates/i.test(message.text())) {
+        cspViolations.push(message.text());
+      }
+    });
+
+    await page.goto(appOrigin, {waitUntil: 'domcontentloaded'});
+    await expect(page.locator('#auth-pages')).toBeVisible({timeout: 30_000});
+    expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__)).toBe(APP_HOST);
+    expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_ID__)).toBe('default');
+    expect(discoveryRequests).toEqual([{host: DEFAULT_DISCOVERY_HOST, path: '/.well-known/teagramd/client'}]);
+    expect(await page.locator('meta[data-server-policy-enforcement]').getAttribute('content'))
+    .toBe(`connect-src 'self' ${websocketEndpoint} https://api.telegram.org;`);
+    expect(cspViolations).toEqual([]);
+    expect(await page.evaluate(() => (window as any).__cspViolations)).toEqual([]);
+  } finally {
+    await context.close();
+    await edgeProxy.close();
+  }
+});
+
 async function expectUnrelatedConnectionsBlocked(page: Page, httpsRequests: string[], webSocketRequests: string[], webSocketUrl: string) {
   const httpsRequestCount = httpsRequests.length;
   const webSocketRequestCount = webSocketRequests.length;
@@ -1307,7 +1388,7 @@ async function runPrivateArtifactFirefoxEgress(
   await pinnedPage.close();
 }
 
-test('isolates two server tabs when a custom server worker takes control', async({page}, testInfo) => {
+test('isolates two server tabs when a custom server worker takes control', async({browser, page}, testInfo) => {
   const serverHttpUrl = process.env.TEAGRAM_CUSTOM_SERVER_TEST_HTTP_URL;
   const serverWebSocketUrl = process.env.TEAGRAM_CUSTOM_SERVER_TEST_WS_URL;
   const hasServerFixture = !!serverHttpUrl && !!serverWebSocketUrl;
@@ -1333,6 +1414,7 @@ test('isolates two server tabs when a custom server worker takes control', async
   const tlsResponseErrors: Error[] = [];
   const fixtureResponses = new Set<ServerResponse>();
   let webSocketServer: WebSocketServer | undefined;
+  let serveConfiguredDefaultServer = false;
   let tlsCleanupWait: string | undefined;
   const phaseDiagnostics: PhaseDiagnostic[] = [];
   const phaseTracker = createPhaseTracker((diagnostic) => {
@@ -1390,7 +1472,10 @@ test('isolates two server tabs when a custom server worker takes control', async
       }, (request, response) => {
         const host = (request.headers.host || '').replace(/:\d+$/, '');
         const url = new URL(request.url || '/', `https://${host}`);
-        if(host === APP_HOST && url.pathname === '/stream/__server-isolation-probe') {
+        if(host === APP_HOST && url.pathname === '/teagram-config.json' && serveConfiguredDefaultServer) {
+          response.writeHead(200, {'cache-control': 'no-store', 'content-type': 'application/json'});
+          response.end(JSON.stringify({server: APP_HOST, autoGuest: false}));
+        } else if(host === APP_HOST && url.pathname === '/stream/__server-isolation-probe') {
           response.writeHead(200, {'content-type': 'text/plain'});
           response.end('network-default');
         } else if(url.pathname === '/.well-known/teagramd/client') {
@@ -1548,7 +1633,8 @@ test('isolates two server tabs when a custom server worker takes control', async
       await password.fill(SERVER_PASSWORD);
       await auth.getByRole('button', {name: 'Next'}).click();
       await expect(page.locator('#page-chats')).toBeVisible({timeout: 60_000});
-      expect(Number(await page.evaluate(() => String((window as any).rootScope.myId)))).toBeGreaterThan(0);
+      const userId = await page.evaluate(() => String((window as any).rootScope.myId));
+      expect(Number(userId)).toBeGreaterThan(0);
 
       // Selection and bootstrap each resolve the profile, so more than one fetch is expected; all must hit the server host.
       expect(discoveryRequests.length).toBeGreaterThan(0);
@@ -1570,14 +1656,77 @@ test('isolates two server tabs when a custom server worker takes control', async
         pin: {host: APP_HOST, endpoint: SERVER_WSS_ENDPOINT}
       });
 
-      await page.reload({waitUntil: 'domcontentloaded'});
-      await expect(page.locator('#page-chats')).toBeVisible({timeout: 60_000});
-      await expect(page.locator('#auth-pages')).toHaveCount(0);
-      await expect(page.getByRole('dialog')).toHaveCount(0);
-      expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_ID__)).toBe('default');
-      expect(await getSavedState()).toEqual(savedState);
-      expect(discoveryRequests.every((url) => url === `https://${DEFAULT_DISCOVERY_HOST}/.well-known/teagramd/client`)).toBe(true);
-      expect(webSocketRequests).not.toContain(`wss://${APP_HOST}/apiws`);
+      const getPersistedAccountState = (targetPage: Page) => targetPage.evaluate(async() => {
+        const moduleUrl = new URL('/src/lib/accounts/accountController.ts', window.location.origin).href;
+        const {AccountController} = await import(moduleUrl);
+        const account = await AccountController.get(1);
+        const authKeys = Object.entries(account).filter(([key, value]) => /^dc\d+_auth_key$/.test(key) && typeof value === 'string');
+        const authKeyDigests = await Promise.all(authKeys.map(async([key, value]) => {
+          const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value as string));
+          const fingerprint = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+          return [key, fingerprint];
+        }));
+        return {userId: String(account.userId), authKeyDigests};
+      });
+      const accountState = await getPersistedAccountState(page);
+      expect(accountState.userId).toBe(userId);
+      expect(accountState.authKeyDigests.length).toBeGreaterThan(0);
+
+      await page.locator('#column-left .sidebar-tools-button').click();
+      await page.locator('.btn-menu-item').filter({hasText: 'Saved Messages'}).click();
+      await expect.poll(() => page.evaluate(() => {
+        const manager = (window as any).rootScope.managers.appImManager;
+        return String(manager.chat.peerId) === String(manager.myId);
+      }), {timeout: 30_000}).toBe(true);
+      await expect(page.locator('body')).toHaveClass(/has-chat/);
+
+      const hostAndPath = (requests: string[]) => requests.map((request) => {
+        const {hostname, pathname} = new URL(request);
+        return {hostname, pathname};
+      });
+      const discoveryRoutes = hostAndPath(discoveryRequests);
+      const webSocketRoutes = hostAndPath(webSocketRequests);
+      expect(discoveryRoutes).toContainEqual({hostname: DEFAULT_DISCOVERY_HOST, pathname: '/.well-known/teagramd/client'});
+      expect(discoveryRoutes).not.toContainEqual({hostname: APP_HOST, pathname: '/.well-known/teagramd/client'});
+      expect(webSocketRoutes).toContainEqual({hostname: SERVER_HOST, pathname: '/apiws'});
+      expect(webSocketRoutes).not.toContainEqual({hostname: APP_HOST, pathname: '/apiws'});
+
+      // Reopen the persisted profile in a fresh app context with the deployment config enabled.
+      serveConfiguredDefaultServer = true;
+      const storageState = await page.context().storageState({});
+      const persistedOrigin = storageState.origins.find(({origin}) => origin === appOriginString);
+      const persistedValues = new Map(persistedOrigin?.localStorage.map(({name, value}) => [name, value]));
+      const persistedAccount = JSON.parse(persistedValues.get('account1') || '{}');
+      const persistedPins = JSON.parse(persistedValues.get('teagram.server-pins.v1') || '{}');
+      expect(String(persistedAccount.userId)).toBe(userId);
+      expect(Object.keys(persistedAccount).filter((key) => /^dc\d+_auth_key$/.test(key))).not.toHaveLength(0);
+      expect(persistedPins[APP_HOST]).toEqual(savedState.pin);
+      const upgradeContext = await browser.newContext({ignoreHTTPSErrors: true, storageState});
+      try {
+        await upgradeContext.route('**/*', (route) => {
+          const {hostname} = new URL(route.request().url());
+          return hostname === APP_HOST || hostname === SERVER_HOST || hostname === DEFAULT_DISCOVERY_HOST ? route.continue() : route.abort();
+        });
+        const upgradePage = await upgradeContext.newPage();
+        await upgradePage.goto(appOriginString, {waitUntil: 'domcontentloaded'});
+        await expect(upgradePage.locator('#page-chats')).toBeVisible({timeout: 60_000});
+        await expect(upgradePage.locator('#auth-pages')).toHaveCount(0);
+        await expect(upgradePage.getByRole('dialog')).toHaveCount(0);
+        await expect(upgradePage.getByText('Server identity changed', {exact: true})).toHaveCount(0);
+        expect(await upgradePage.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_ID__)).toBe('default');
+        expect(await upgradePage.evaluate(() => String((window as any).rootScope.myId))).toBe(userId);
+        expect(await getPersistedAccountState(upgradePage)).toEqual(accountState);
+        expect(await upgradePage.evaluate((host) => ({
+          choice: localStorage.getItem('teagram.server-choice.v1'),
+          activeId: localStorage.getItem('teagram.active-server-id.v1'),
+          target: JSON.parse(localStorage.getItem('teagram.server-target.v1') || 'null'),
+          pin: JSON.parse(localStorage.getItem('teagram.server-pins.v1') || '{}')[host]
+        }), APP_HOST)).toEqual(savedState);
+        expect(hostAndPath(discoveryRequests)).not.toContainEqual({hostname: APP_HOST, pathname: '/.well-known/teagramd/client'});
+        expect(hostAndPath(webSocketRequests)).not.toContainEqual({hostname: APP_HOST, pathname: '/apiws'});
+      } finally {
+        await upgradeContext.close();
+      }
     });
 
     await runPhase('worker takeover', async() => {

@@ -59,6 +59,10 @@ describe('custom server discovery', () => {
     expect(shouldPromptForServerSelection('web.teagram.io')).toBe(true);
     expect(shouldPromptForServerSelection('web.teagram.io', 'second-server.example')).toBe(false);
     expect(shouldPromptForServerSelection('teagram.tailaa4918.ts.net')).toBe(false);
+    const defaultBootstrapSources = getServerConnectSources('web.teagram.io');
+    expect(defaultBootstrapSources).toContain('https://server.teagram.io');
+    expect(defaultBootstrapSources).toContain('wss:');
+    expect(defaultBootstrapSources).not.toContain('wss://web.teagram.io');
     expect(getServerConnectSources('demo.example', {
       mode: 'private',
       endpoint: 'wss://demo.example:2443/apiws'
