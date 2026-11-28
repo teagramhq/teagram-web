@@ -1,0 +1,134 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-failover-monitor
+  labels:
+    app.kubernetes.io/name: web-failover-monitor
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  progressDeadlineSeconds: 120
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: web-failover-monitor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: web-failover-monitor
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9090"
+    spec:
+      serviceAccountName: web-failover-monitor
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 20
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: monitor
+          image: ghcr.io/teagramhq/teagram-web
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/bin/web-failover-monitor
+          ports:
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: CLOUDFLARE_ZONE_ID
+              valueFrom:
+                secretKeyRef:
+                  name: web-failover-config
+                  key: zone-id
+            - name: CLOUDFLARE_RECORD_ID
+              valueFrom:
+                secretKeyRef:
+                  name: web-failover-config
+                  key: record-id
+            - name: PAGES_TARGET
+              valueFrom:
+                secretKeyRef:
+                  name: web-failover-config
+                  key: pages-target
+            - name: TUNNEL_TARGET
+              valueFrom:
+                secretKeyRef:
+                  name: web-failover-config
+                  key: tunnel-target
+            - name: PAGES_IP
+              valueFrom:
+                secretKeyRef:
+                  name: web-failover-config
+                  key: pages-ip
+            - name: INITIAL_TARGET
+              valueFrom:
+                secretKeyRef:
+                  name: web-failover-config
+                  key: initial-target
+            - name: WRITES_ENABLED
+              value: "false"
+            - name: FAILBACK_ENABLED
+              value: "false"
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 20
+            timeoutSeconds: 2
+            failureThreshold: 3
+          volumeMounts:
+            - name: cloudflare-token
+              mountPath: /run/credentials/cloudflare
+              readOnly: true
+      volumes:
+        - name: cloudflare-token
+          secret:
+            secretName: web-failover-token
+            optional: true
+            defaultMode: 0440
+            items:
+              - key: token
+                path: token

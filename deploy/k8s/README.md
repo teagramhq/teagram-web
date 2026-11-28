@@ -53,3 +53,39 @@ The `test: k8s-deploy` job runs the same deployment script in a throwaway k3s
 cluster. It first deploys and smokes the reviewed image, then substitutes an
 unavailable image and requires the script to restore the prior ReplicaSet and
 image. The test cluster uses the production k3s image and disable flags.
+
+## Pages failover monitor
+
+The separate `failover` overlay runs the monitor in the `web-failover`
+namespace with its own service account. Render it with the same image pin and
+`--overlay failover`. The `Deploy.` identity remains unable to read Secrets in
+this namespace; the namespace, service account, Role, and RoleBinding are
+provisioned through the cutover bootstrap.
+
+Before starting the monitor, provision a `web-failover-config` Secret in that
+namespace with keys `zone-id`, `record-id`, `pages-target`, `tunnel-target`,
+`pages-ip`, and `initial-target`. These values stay outside the repository. The
+`web-failover-token` Secret can contain a `token` key for Cloudflare API access.
+The token is mounted at `/run/credentials/cloudflare/token` and never enters an
+environment variable. Without the token, the monitor still runs in dry-run mode
+and logs its decisions, but cannot validate the DNS record. Enabling writes
+without the token fails closed. Its Role grants `get` for only that named
+Secret, plus access to its one state ConfigMap and permission to create warning
+Events.
+
+The deployment starts with `WRITES_ENABLED=false`. It reads and validates the
+configured DNS record at startup and before every write. `FAILBACK_ENABLED`
+starts false and can be switched independently after the Pages certificate has
+been verified. The probe checks `mtproto-target.json` directly at the supplied
+Pages IP with SNI and Host `web.teagram.io` and full TLS verification. Logs use
+structured `level=alert` entries and Kubernetes Warning Events for a denied
+write or exhausted change cap; the metrics Service exposes probe status,
+current origin, change count, and the safety lock on port 9090.
+
+For a monitor rollback, first set `WRITES_ENABLED=false` and
+`FAILBACK_ENABLED=false`, wait for the rollout, then scale
+`web-failover-monitor` to zero in `web-failover`. The web deployment and tunnel
+route remain available, and the monitor state and Secrets stay in place for
+recovery. The production cluster has no preview environment; CI validates the
+rendered manifests and RBAC in a throwaway k3s cluster and exercises the
+decision logic with a forced failing probe and a simulated ten-minute recovery.

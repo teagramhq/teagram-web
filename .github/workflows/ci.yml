@@ -528,7 +528,7 @@ jobs:
           KUBERNETES_VERSION: 1.37.1
         run: bash .github/scripts/start-k3d-cluster.sh
 
-      - name: Render and validate production and CI overlays
+      - name: Render and validate production, failover, and CI overlays
         env:
           KUBERNETES_VERSION: 1.37.1
         run: |
@@ -545,8 +545,12 @@ jobs:
             >"$pin"
           python3 deploy/k8s/render.py --pin "$pin" --source-commit "$source_commit" \
             >"$RUNNER_TEMP/teagram-web-prod.yaml"
+          python3 deploy/k8s/render.py --pin "$pin" --source-commit "$source_commit" \
+            --overlay failover >"$RUNNER_TEMP/web-failover-prod.yaml"
           grep -Fq "ghcr.io/teagramhq/teagram-web@sha256:$image_digest" \
             "$RUNNER_TEMP/teagram-web-prod.yaml"
+          grep -Fq "ghcr.io/teagramhq/teagram-web@sha256:$image_digest" \
+            "$RUNNER_TEMP/web-failover-prod.yaml"
           ci_manifest="$RUNNER_TEMP/teagram-web-ci.yaml"
           kubectl kustomize deploy/k8s/overlays/ci >"$ci_manifest"
           "$(go env GOPATH)/bin/kubeconform" \
@@ -560,8 +564,15 @@ jobs:
             -summary \
             -kubernetes-version "$KUBERNETES_VERSION" \
             "$prod_manifest"
+          failover_manifest="$RUNNER_TEMP/web-failover-prod.yaml"
+          "$(go env GOPATH)/bin/kubeconform" \
+            -strict \
+            -summary \
+            -kubernetes-version "$KUBERNETES_VERSION" \
+            "$failover_manifest"
           kubectl apply --dry-run=client --validate=false -k deploy/k8s/overlays/ci
           kubectl apply --dry-run=client --validate=false -k deploy/k8s/overlays/prod
+          kubectl apply --dry-run=client --validate=false -k deploy/k8s/overlays/failover
 
       - name: Delete the throwaway Kubernetes API
         if: always()
@@ -653,6 +664,9 @@ jobs:
         with:
           go-version: '1.27.2'
 
+      - name: Run failover monitor decision tests
+        run: GO111MODULE=off go test -count=1 -v ./deploy/k8s/failover-monitor
+
       - name: Install kubectl for the pinned Kubernetes version
         env:
           KUBERNETES_VERSION: 1.37.1
@@ -675,6 +689,28 @@ jobs:
           set -euo pipefail
           "$(go env GOPATH)/bin/k3d" image import "$IMAGE_REF" --cluster "$K3D_CLUSTER" --mode direct
           kubectl create namespace teagram
+          kubectl create serviceaccount teagram-web-deployer --namespace teagram
+          kubectl apply --filename deploy/k8s/failover/access.yaml
+          kubectl create serviceaccount other-workload --namespace web-failover
+
+          check_failover_access() {
+            local identity="$1" verb="$2" resource="$3" expected="$4" actual
+            actual="$(kubectl auth can-i "$verb" "$resource" --namespace web-failover --as="$identity" || true)"
+            [[ "$actual" == "$expected" ]] || {
+              echo "::error::${identity} can-i ${verb} ${resource} returned ${actual}; expected ${expected}"
+              exit 1
+            }
+          }
+
+          check_failover_access system:serviceaccount:web-failover:web-failover-monitor get secrets/web-failover-token yes
+          check_failover_access system:serviceaccount:web-failover:web-failover-monitor get secrets no
+          check_failover_access system:serviceaccount:web-failover:web-failover-monitor get secrets/other-secret no
+          check_failover_access system:serviceaccount:web-failover:default get secrets/web-failover-token no
+          check_failover_access system:serviceaccount:web-failover:other-workload get secrets/web-failover-token no
+          check_failover_access system:serviceaccount:teagram:teagram-web-deployer get secrets/web-failover-token no
+          check_failover_access system:serviceaccount:teagram:teagram-web-deployer get secrets no
+          check_failover_access system:serviceaccount:teagram:teagram-web-deployer create pods no
+
           kubectl kustomize deploy/k8s/overlays/ci > "$RUNNER_TEMP/teagram-web-ci.yaml"
           kubectl apply --dry-run=server --filename "$RUNNER_TEMP/teagram-web-ci.yaml"
           kubectl apply --filename "$RUNNER_TEMP/teagram-web-ci.yaml"
@@ -683,6 +719,8 @@ jobs:
             --namespace teagram \
             --selector app.kubernetes.io/name=teagram-web \
             --timeout=60s
+          kubectl kustomize deploy/k8s/overlays/failover > "$RUNNER_TEMP/web-failover-ci.yaml"
+          kubectl apply --dry-run=server --filename "$RUNNER_TEMP/web-failover-ci.yaml"
 
       - name: Smoke test deployment and forced rollback on the throwaway cluster
         env:

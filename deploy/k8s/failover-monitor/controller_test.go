@@ -1,0 +1,302 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"log"
+	"strings"
+	"testing"
+	"time"
+)
+
+func testConfig() Config {
+	return Config{
+		ZoneID:          strings.Repeat("a", 32),
+		RecordID:        strings.Repeat("b", 32),
+		PagesTarget:     "pages.example.test",
+		TunnelTarget:    "tunnel.example.test",
+		PagesIP:         "127.0.0.1",
+		InitialTarget:   "pages.example.test",
+		FailbackEnabled: true,
+	}
+}
+
+func TestDryRunLogsFailoverAndFailbackDecisions(t *testing.T) {
+	config := testConfig()
+	var logs bytes.Buffer
+	controller, err := NewController(context.Background(), config, nil, nil, log.New(&logs, "", 0), NewMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+
+	controller.observe(context.Background(), start, fmt.Errorf("forced probe failure"))
+	controller.observe(context.Background(), start.Add(20*time.Second), fmt.Errorf("forced probe failure"))
+	controller.observe(context.Background(), start.Add(40*time.Second), fmt.Errorf("forced probe failure"))
+	if got := controller.CurrentTarget(); got != "tunnel.example.test" {
+		t.Fatalf("target after three failures = %q, want tunnel target", got)
+	}
+	if !strings.Contains(logs.String(), `message="would switch to tunnel.example.test"`) {
+		t.Fatalf("dry-run failover decision was not logged: %s", logs.String())
+	}
+
+	controller.observe(context.Background(), start.Add(time.Minute), nil)
+	controller.observe(context.Background(), start.Add(10*time.Minute+59*time.Second), nil)
+	if got := controller.CurrentTarget(); got != "tunnel.example.test" {
+		t.Fatalf("target switched back before the healthy window elapsed: %q", got)
+	}
+	controller.observe(context.Background(), start.Add(11*time.Minute), nil)
+	if got := controller.CurrentTarget(); got != "pages.example.test" {
+		t.Fatalf("target after ten healthy minutes = %q, want Pages target", got)
+	}
+	if !strings.Contains(logs.String(), `message="would switch to pages.example.test"`) {
+		t.Fatalf("dry-run failback decision was not logged: %s", logs.String())
+	}
+	if got := controller.ChangeCount(start.Add(11 * time.Minute)); got != 2 {
+		t.Fatalf("simulated changes in the rolling hour = %d, want 2", got)
+	}
+	t.Logf("dry-run evidence: %s", logs.String())
+}
+
+func TestFailureStreakResetsOnHealthyProbe(t *testing.T) {
+	config := testConfig()
+	controller, err := NewController(context.Background(), config, nil, nil, log.New(&bytes.Buffer{}, "", 0), NewMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	controller.observe(context.Background(), start, fmt.Errorf("forced probe failure"))
+	controller.observe(context.Background(), start.Add(20*time.Second), fmt.Errorf("forced probe failure"))
+	controller.observe(context.Background(), start.Add(40*time.Second), nil)
+	controller.observe(context.Background(), start.Add(60*time.Second), fmt.Errorf("forced probe failure"))
+	controller.observe(context.Background(), start.Add(80*time.Second), fmt.Errorf("forced probe failure"))
+	if got := controller.CurrentTarget(); got != "pages.example.test" {
+		t.Fatalf("target changed before three consecutive failures: %q", got)
+	}
+	controller.observe(context.Background(), start.Add(100*time.Second), fmt.Errorf("forced probe failure"))
+	if got := controller.CurrentTarget(); got != "tunnel.example.test" {
+		t.Fatalf("target after three consecutive failures = %q, want tunnel target", got)
+	}
+}
+
+func TestFailbackCanBeDisabledIndependently(t *testing.T) {
+	config := testConfig()
+	config.InitialTarget = config.TunnelTarget
+	config.FailbackEnabled = false
+	controller, err := NewController(context.Background(), config, nil, nil, log.New(&bytes.Buffer{}, "", 0), NewMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	controller.observe(context.Background(), start, nil)
+	controller.observe(context.Background(), start.Add(10*time.Minute), nil)
+	if got := controller.CurrentTarget(); got != "tunnel.example.test" {
+		t.Fatalf("target switched back with failback disabled: %q", got)
+	}
+}
+
+func TestChangeCapHoldsTunnelTarget(t *testing.T) {
+	config := testConfig()
+	config.InitialTarget = config.TunnelTarget
+	var logs bytes.Buffer
+	controller, err := NewController(context.Background(), config, nil, nil, log.New(&logs, "", 0), NewMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	controller.history = []time.Time{start.Add(-30 * time.Minute), start.Add(-20 * time.Minute)}
+	controller.healthySince = start.Add(-10 * time.Minute)
+	controller.observe(context.Background(), start, nil)
+	if got := controller.CurrentTarget(); got != "tunnel.example.test" {
+		t.Fatalf("target switched back with only one rate-cap slot left: %q", got)
+	}
+	if !strings.Contains(logs.String(), "change_cap_reserve") {
+		t.Fatalf("rate-cap alert was not logged: %s", logs.String())
+	}
+}
+
+func TestFinalAllowedChangeLeavesMonitorOnTunnelAndAlerts(t *testing.T) {
+	config := testConfig()
+	var logs bytes.Buffer
+	controller, err := NewController(context.Background(), config, nil, nil, log.New(&logs, "", 0), NewMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	controller.history = []time.Time{start.Add(-30 * time.Minute), start.Add(-20 * time.Minute)}
+	controller.observe(context.Background(), start, fmt.Errorf("forced probe failure"))
+	controller.observe(context.Background(), start.Add(20*time.Second), fmt.Errorf("forced probe failure"))
+	controller.observe(context.Background(), start.Add(40*time.Second), fmt.Errorf("forced probe failure"))
+	if got := controller.CurrentTarget(); got != "tunnel.example.test" {
+		t.Fatalf("target at the cap = %q, want tunnel target", got)
+	}
+	if got := controller.ChangeCount(start.Add(time.Minute)); got != maxChanges {
+		t.Fatalf("changes at the cap = %d, want %d", got, maxChanges)
+	}
+	if !strings.Contains(logs.String(), "change_cap_exhausted") {
+		t.Fatalf("change cap alert was not logged: %s", logs.String())
+	}
+}
+
+func TestExhaustedCapWithPagesTargetLocksWrites(t *testing.T) {
+	config := testConfig()
+	config.WritesEnabled = true
+	now := time.Now()
+	state := &memoryStateStore{state: PersistentState{
+		Target: config.PagesTarget,
+		Changes: []time.Time{
+			now.Add(-30 * time.Minute),
+			now.Add(-20 * time.Minute),
+			now.Add(-10 * time.Minute),
+		},
+	}}
+	client := &mutableRecordClient{record: testRecord(config, config.PagesTarget)}
+	var logs bytes.Buffer
+	controller, err := NewController(context.Background(), config, client, state, log.New(&logs, "", 0), NewMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !controller.SafetyLocked() || len(client.patched) != 0 {
+		t.Fatalf("invalid exhausted-cap state did not lock writes: %s", logs.String())
+	}
+}
+
+func TestRecordValidationAllowsOnlyConfiguredRecordAndTargets(t *testing.T) {
+	config := testConfig()
+	record := testRecord(config, config.PagesTarget)
+	if _, err := validateRecord(record, config); err != nil {
+		t.Fatalf("valid record was rejected: %v", err)
+	}
+	tests := []struct {
+		name   string
+		change func(*DNSRecord)
+	}{
+		{name: "wrong record ID", change: func(record *DNSRecord) { record.ID = strings.Repeat("c", 32) }},
+		{name: "wrong record name", change: func(record *DNSRecord) { record.Name = "other.example.test" }},
+		{name: "wrong record type", change: func(record *DNSRecord) { record.Type = "A" }},
+		{name: "unconfigured target", change: func(record *DNSRecord) { record.Content = "unexpected.example.test" }},
+		{name: "unproxied record", change: func(record *DNSRecord) { record.Proxied = false }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			invalid := record
+			test.change(&invalid)
+			if _, err := validateRecord(invalid, config); err == nil {
+				t.Fatal("invalid record was accepted")
+			}
+		})
+	}
+}
+
+func TestWriteRechecksRecordAndRefusesOutOfBandTargetChange(t *testing.T) {
+	config := testConfig()
+	config.WritesEnabled = true
+	state := &memoryStateStore{state: PersistentState{Target: config.PagesTarget}}
+	client := &fakeRecordClient{records: []DNSRecord{
+		testRecord(config, config.PagesTarget),
+		testRecord(config, config.TunnelTarget),
+	}}
+	var logs bytes.Buffer
+	controller, err := NewController(context.Background(), config, client, state, log.New(&logs, "", 0), NewMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	controller.observe(context.Background(), start, fmt.Errorf("forced probe failure"))
+	controller.observe(context.Background(), start.Add(20*time.Second), fmt.Errorf("forced probe failure"))
+	controller.observe(context.Background(), start.Add(40*time.Second), fmt.Errorf("forced probe failure"))
+	if got := controller.CurrentTarget(); got != "pages.example.test" {
+		t.Fatalf("monitor accepted an out-of-band record change: %q", got)
+	}
+	if len(client.patched) != 0 {
+		t.Fatalf("record was patched after drift: %#v", client.patched)
+	}
+	if !controller.SafetyLocked() || !strings.Contains(logs.String(), "record_drift_before_write") {
+		t.Fatalf("drift did not lock writes and alert: %s", logs.String())
+	}
+}
+
+func TestWriteReadsAndPersistsTheSingleAllowedRecord(t *testing.T) {
+	config := testConfig()
+	config.WritesEnabled = true
+	state := &memoryStateStore{state: PersistentState{Target: config.PagesTarget}}
+	client := &mutableRecordClient{record: testRecord(config, config.PagesTarget)}
+	controller, err := NewController(context.Background(), config, client, state, log.New(&bytes.Buffer{}, "", 0), NewMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	controller.observe(context.Background(), start, fmt.Errorf("forced probe failure"))
+	controller.observe(context.Background(), start.Add(20*time.Second), fmt.Errorf("forced probe failure"))
+	controller.observe(context.Background(), start.Add(40*time.Second), fmt.Errorf("forced probe failure"))
+	if len(client.patched) != 1 || client.patched[0] != config.TunnelTarget {
+		t.Fatalf("record updates = %#v, want only the tunnel target", client.patched)
+	}
+	if client.getCalls != 2 {
+		t.Fatalf("record reads = %d, want startup and pre-write reads", client.getCalls)
+	}
+	if state.state.Target != config.TunnelTarget || len(state.state.Changes) != 1 {
+		t.Fatalf("persisted switch state = %#v, want tunnel target and one change", state.state)
+	}
+}
+
+func testRecord(config Config, target string) DNSRecord {
+	return DNSRecord{
+		ID:      config.RecordID,
+		Name:    recordName,
+		Type:    recordType,
+		Content: target,
+		Proxied: true,
+	}
+}
+
+type fakeRecordClient struct {
+	records []DNSRecord
+	patched []string
+}
+
+func (client *fakeRecordClient) GetRecord(context.Context) (DNSRecord, error) {
+	if len(client.records) == 0 {
+		return DNSRecord{}, fmt.Errorf("no fake record left")
+	}
+	record := client.records[0]
+	client.records = client.records[1:]
+	return record, nil
+}
+
+func (client *fakeRecordClient) PatchTarget(_ context.Context, target string) (DNSRecord, error) {
+	client.patched = append(client.patched, target)
+	return DNSRecord{}, nil
+}
+
+type memoryStateStore struct {
+	state PersistentState
+}
+
+type mutableRecordClient struct {
+	record   DNSRecord
+	getCalls int
+	patched  []string
+}
+
+func (client *mutableRecordClient) GetRecord(context.Context) (DNSRecord, error) {
+	client.getCalls++
+	return client.record, nil
+}
+
+func (client *mutableRecordClient) PatchTarget(_ context.Context, target string) (DNSRecord, error) {
+	client.patched = append(client.patched, target)
+	client.record.Content = target
+	client.record.Proxied = true
+	return client.record, nil
+}
+
+func (store *memoryStateStore) Load(context.Context) (PersistentState, error) {
+	return store.state, nil
+}
+
+func (store *memoryStateStore) Save(_ context.Context, state PersistentState) error {
+	store.state = state
+	return nil
+}

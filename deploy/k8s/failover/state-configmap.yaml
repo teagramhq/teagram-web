@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-failover-state
+  namespace: web-failover
+  labels:
+    app.kubernetes.io/name: web-failover
+data:
+  state.json: ""
