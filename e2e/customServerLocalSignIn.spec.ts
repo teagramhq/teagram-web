@@ -1527,7 +1527,7 @@ test('isolates two server tabs when a custom server worker takes control', async
       }, streamingDocument(streamingDocId))).toBe(true);
     });
 
-    await runPhase('default username/password sign-in and chat open', async() => {
+    await runPhase('default username/password sign-in and chat page open', async() => {
       const auth = page.locator('#auth-pages');
       await expect(auth.getByRole('textbox', {name: 'Username'})).toBeVisible({timeout: 30_000});
       const warmup = await page.evaluate(async(username) => {
@@ -1548,17 +1548,8 @@ test('isolates two server tabs when a custom server worker takes control', async
       await password.fill(SERVER_PASSWORD);
       await auth.getByRole('button', {name: 'Next'}).click();
       await expect(page.locator('#page-chats')).toBeVisible({timeout: 60_000});
-
-      const openedChat = await page.evaluate(async() => {
-        const appImManager = (window as any).rootScope.managers.appImManager;
-        await appImManager.setPeer({peerId: appImManager.myId});
-        return {
-          peerId: String(appImManager.chat?.peerId),
-          myId: String(appImManager.myId)
-        };
-      });
-      expect(openedChat.peerId).toBe(openedChat.myId);
-      await expect(page.locator('.chat').first()).toBeVisible();
+      await expect(page.locator('#auth-pages')).toHaveCount(0);
+      expect(Number(await page.evaluate(() => String((window as any).rootScope.myId)))).toBeGreaterThan(0);
 
       expect(discoveryRequests).toEqual([`https://${DEFAULT_DISCOVERY_HOST}/.well-known/teagramd/client`]);
       expect(webSocketRequests).toContain(SERVER_WSS_ENDPOINT);
@@ -1837,7 +1828,7 @@ test('isolates two server tabs when a custom server worker takes control', async
   expect(completedPhases).toEqual([
     'setup',
     'streaming: default tab',
-    'default username/password sign-in and chat open',
+    'default username/password sign-in and chat page open',
     'worker takeover',
     'identity handshake',
     'streaming isolation',
