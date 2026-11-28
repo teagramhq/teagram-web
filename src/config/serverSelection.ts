@@ -129,8 +129,9 @@ export function getServerConnectSources(host: string, target?: MtprotoTarget) {
   if(httpsOrigin !== location.origin) sources.push(httpsOrigin);
   if(target?.mode === 'private') sources.push(target.endpoint);
   else sources.push(isDefaultServerBootstrap ? 'wss:' : websocketOrigin);
+  sources.push(TELEGRAM_BOT_API_ORIGIN);
   // The server endpoint is unknown until discovery, so bootstrap allows it briefly and narrows after discovery.
-  sources.push(isDefaultServerBootstrap ? `https://${DEFAULT_SERVER_DISCOVERY_HOST}` : TELEGRAM_BOT_API_ORIGIN);
+  if(isDefaultServerBootstrap) sources.push(`https://${DEFAULT_SERVER_DISCOVERY_HOST}`);
   return sources;
 }
 

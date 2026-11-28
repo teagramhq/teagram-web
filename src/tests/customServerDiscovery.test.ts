@@ -1,5 +1,6 @@
 import {beforeAll, describe, expect, it, vi} from 'vitest';
 import {webcrypto} from 'node:crypto';
+import {TELEGRAM_BOT_API_ORIGIN} from '@config/telegramBotApi';
 import {
   ACTIVE_SERVER_ID_KEY,
   DISCOVERY_MAX_BYTES,
@@ -61,6 +62,7 @@ describe('custom server discovery', () => {
     expect(shouldPromptForServerSelection('teagram.tailaa4918.ts.net')).toBe(false);
     const defaultBootstrapSources = getServerConnectSources('web.teagram.io');
     expect(defaultBootstrapSources).toContain('https://server.teagram.io');
+    expect(defaultBootstrapSources).toContain(TELEGRAM_BOT_API_ORIGIN);
     expect(defaultBootstrapSources).toContain('wss:');
     expect(defaultBootstrapSources).not.toContain('wss://web.teagram.io');
     expect(getServerConnectSources('demo.example')).toContain('wss://demo.example');
