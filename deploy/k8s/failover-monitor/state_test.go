@@ -24,6 +24,8 @@ func TestStateStoreCreatesMissingRuntimeConfigMap(t *testing.T) {
 			t.Error("state request did not use the projected token")
 		}
 		switch {
+		case request.Method == http.MethodGet && request.URL.Path == stateInitializationMarkerPath():
+			response.WriteHeader(http.StatusNotFound)
 		case request.Method == http.MethodGet && request.URL.Path == statePath():
 			response.WriteHeader(http.StatusNotFound)
 		case request.Method == http.MethodPost && request.URL.Path == "/api/v1/namespaces/"+monitorNamespace+"/configmaps":
@@ -71,6 +73,122 @@ func TestStateStoreCreatesMissingRuntimeConfigMap(t *testing.T) {
 	}
 }
 
+func TestControllerRecoversWhenFirstStateCreationFails(t *testing.T) {
+	tokenPath := writeProjectedTestToken(t, "state-token")
+	config := testConfig()
+	config.WritesEnabled = true
+	stateConfigMapExists := false
+	markerExists := false
+	stateCreateAttempts := 0
+	stateJSON := ""
+	resourceVersion := 7
+	var createOrder []string
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer state-token" {
+			t.Error("Kubernetes request did not use the projected token")
+		}
+		response.Header().Set("Content-Type", "application/json")
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == statePath():
+			if !stateConfigMapExists {
+				http.NotFound(response, request)
+				return
+			}
+			_ = json.NewEncoder(response).Encode(map[string]any{
+				"metadata": map[string]string{"resourceVersion": strconv.Itoa(resourceVersion)},
+				"data":     map[string]string{stateDataKey: stateJSON},
+			})
+		case request.Method == http.MethodGet && request.URL.Path == stateInitializationMarkerPath():
+			if !markerExists {
+				http.NotFound(response, request)
+				return
+			}
+			_ = json.NewEncoder(response).Encode(map[string]any{"metadata": map[string]string{"name": stateInitializationMarker}})
+		case request.Method == http.MethodPost && request.URL.Path == "/api/v1/namespaces/"+monitorNamespace+"/configmaps":
+			var resource struct {
+				Metadata map[string]string `json:"metadata"`
+				Data     map[string]string `json:"data"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&resource); err != nil {
+				t.Errorf("ConfigMap create body was invalid: %v", err)
+			}
+			switch resource.Metadata["name"] {
+			case stateConfigMap:
+				createOrder = append(createOrder, "state")
+				stateCreateAttempts++
+				if stateCreateAttempts == 1 {
+					response.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				stateJSON = resource.Data[stateDataKey]
+				stateConfigMapExists = true
+				resourceVersion++
+				_ = json.NewEncoder(response).Encode(map[string]any{
+					"metadata": map[string]string{"resourceVersion": strconv.Itoa(resourceVersion)},
+					"data":     map[string]string{stateDataKey: stateJSON},
+				})
+			case stateInitializationMarker:
+				if !stateConfigMapExists {
+					t.Error("initialization marker was created before the runtime state ConfigMap")
+				}
+				createOrder = append(createOrder, "marker")
+				markerExists = true
+				response.WriteHeader(http.StatusCreated)
+			default:
+				t.Errorf("unexpected ConfigMap create name %q", resource.Metadata["name"])
+				http.NotFound(response, request)
+			}
+		case request.Method == http.MethodPatch && request.URL.Path == statePath():
+			var patch struct {
+				Data map[string]string `json:"data"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&patch); err != nil {
+				t.Errorf("state ConfigMap patch body was invalid: %v", err)
+			}
+			stateJSON = patch.Data[stateDataKey]
+			resourceVersion++
+			_ = json.NewEncoder(response).Encode(map[string]any{
+				"metadata": map[string]string{"resourceVersion": strconv.Itoa(resourceVersion)},
+			})
+		case request.Method == http.MethodPost && request.URL.Path == "/api/v1/namespaces/"+monitorNamespace+"/events":
+			response.WriteHeader(http.StatusCreated)
+		default:
+			t.Errorf("unexpected Kubernetes API request: %s %s", request.Method, request.URL.Path)
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+
+	store := &KubernetesStateStore{
+		endpoint:  server.URL,
+		tokenPath: tokenPath,
+		podName:   "monitor-test",
+		podUID:    "pod-uid-test",
+		client:    server.Client(),
+	}
+	var logs bytes.Buffer
+	controller, err := NewController(
+		context.Background(), config,
+		&mutableRecordClient{record: testRecord(config, config.PagesTarget)},
+		store,
+		log.New(&logs, "", 0),
+		NewMetrics(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !controller.SafetyLocked() {
+		t.Fatal("writes must stay locked after the first state creation attempt fails")
+	}
+	controller.retryRecordValidation(context.Background())
+	if controller.SafetyLocked() || controller.CurrentTarget() != config.PagesTarget {
+		t.Fatalf("monitor did not recover after state creation retry: locked=%t target=%q logs=%s", controller.SafetyLocked(), controller.CurrentTarget(), logs.String())
+	}
+	if !stateConfigMapExists || !markerExists || stateCreateAttempts != 2 || len(createOrder) != 3 || createOrder[0] != "state" || createOrder[1] != "state" || createOrder[2] != "marker" {
+		t.Fatalf("initial state creation did not retry before marking initialized: state=%t marker=%t attempts=%d order=%v", stateConfigMapExists, markerExists, stateCreateAttempts, createOrder)
+	}
+}
+
 func TestControllerRestartWithMissingStateKeepsWritesLocked(t *testing.T) {
 	tokenPath := writeProjectedTestToken(t, "state-token")
 	config := testConfig()
@@ -91,6 +209,12 @@ func TestControllerRestartWithMissingStateKeepsWritesLocked(t *testing.T) {
 		}
 		response.Header().Set("Content-Type", "application/json")
 		switch {
+		case request.Method == http.MethodGet && request.URL.Path == stateInitializationMarkerPath():
+			if !initializationMarkerExists {
+				http.NotFound(response, request)
+				return
+			}
+			_ = json.NewEncoder(response).Encode(map[string]any{"metadata": map[string]string{"name": stateInitializationMarker}})
 		case request.Method == http.MethodGet && request.URL.Path == statePath():
 			if !configMapExists {
 				http.NotFound(response, request)
@@ -285,24 +409,26 @@ func TestControllerStateReadAlertPreservesTokenReadFailureKind(t *testing.T) {
 
 func TestStateStoreReloadsProjectedTokenForEachRequest(t *testing.T) {
 	tokenPath := writeProjectedTestToken(t, "token-one")
-	expectedTokens := []string{"token-one", "token-one", "token-two", "token-three"}
+	expectedTokens := []string{"token-one", "token-one", "token-one", "token-two", "token-three"}
 	requestIndex := 0
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if requestIndex >= len(expectedTokens) || request.Header.Get("Authorization") != "Bearer "+expectedTokens[requestIndex] {
 			t.Error("Kubernetes API request did not use the current projected token")
 		}
 		requestIndex++
-		switch request.Method {
-		case http.MethodGet:
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == stateInitializationMarkerPath():
+			http.NotFound(response, request)
+		case request.Method == http.MethodGet && request.URL.Path == statePath():
 			response.Header().Set("Content-Type", "application/json")
 			_, _ = response.Write([]byte(`{"metadata":{"resourceVersion":"1"},"data":{"state.json":"{\"target\":\"pages.example.test\",\"changes\":[]}"}}`))
-		case http.MethodPatch:
+		case request.Method == http.MethodPatch:
 			response.Header().Set("Content-Type", "application/json")
 			_, _ = response.Write([]byte(`{"metadata":{"resourceVersion":"2"}}`))
-		case http.MethodPost:
+		case request.Method == http.MethodPost:
 			response.WriteHeader(http.StatusCreated)
 		default:
-			t.Errorf("unexpected Kubernetes API method: %s", request.Method)
+			t.Errorf("unexpected Kubernetes API request: %s %s", request.Method, request.URL.Path)
 			http.NotFound(response, request)
 		}
 	}))

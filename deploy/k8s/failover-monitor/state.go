@@ -180,7 +180,6 @@ func (store *KubernetesStateStore) PublishWarning(ctx context.Context, key, mess
 }
 
 func (store *KubernetesStateStore) Load(ctx context.Context) (PersistentState, stateLoadStatus, error) {
-	initializationMarkerExists := false
 	for attempt := 0; attempt < 3; attempt++ {
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, store.endpoint+statePath(), nil)
 		if err != nil {
@@ -195,13 +194,12 @@ func (store *KubernetesStateStore) Load(ctx context.Context) (PersistentState, s
 		}
 		if response.StatusCode == http.StatusNotFound {
 			response.Body.Close()
-			markerCreated, err := store.ensureStateInitializationMarker(ctx)
+			markerExists, err := store.stateInitializationMarkerExists(ctx)
 			if err != nil {
 				return PersistentState{}, stateLoadExisting, err
 			}
-			if !markerCreated {
-				initializationMarkerExists = true
-				continue
+			if markerExists {
+				return PersistentState{}, stateLoadLost, nil
 			}
 			created, err := store.createStateConfigMap(ctx)
 			if errors.Is(err, errStateConfigMapAlreadyExists) {
@@ -211,6 +209,9 @@ func (store *KubernetesStateStore) Load(ctx context.Context) (PersistentState, s
 				return PersistentState{}, stateLoadExisting, err
 			}
 			state, err := store.decodeStateConfigMap(created)
+			if markerErr := store.ensureStateInitializationMarker(ctx); markerErr != nil {
+				return state, stateLoadInitialized, markerErr
+			}
 			return state, stateLoadInitialized, err
 		}
 		if response.StatusCode < 200 || response.StatusCode > 299 {
@@ -218,7 +219,7 @@ func (store *KubernetesStateStore) Load(ctx context.Context) (PersistentState, s
 			return PersistentState{}, stateLoadExisting, fmt.Errorf("Kubernetes state request returned HTTP status %d", response.StatusCode)
 		}
 		state, stateErr := store.decodeStateConfigMap(response)
-		if _, err := store.ensureStateInitializationMarker(ctx); err != nil {
+		if err := store.ensureStateInitializationMarker(ctx); err != nil {
 			return state, stateLoadExisting, err
 		}
 		if stateErr != nil {
@@ -226,26 +227,53 @@ func (store *KubernetesStateStore) Load(ctx context.Context) (PersistentState, s
 		}
 		return state, stateLoadExisting, nil
 	}
-	if initializationMarkerExists {
-		return PersistentState{}, stateLoadLost, nil
-	}
 	return PersistentState{}, stateLoadExisting, fmt.Errorf("state ConfigMap creation conflicted repeatedly")
 }
 
-func (store *KubernetesStateStore) ensureStateInitializationMarker(ctx context.Context) (bool, error) {
+func (store *KubernetesStateStore) stateInitializationMarkerExists(ctx context.Context) (bool, error) {
 	if store.initializationMarkerEnsured {
-		return false, nil
+		return true, nil
 	}
-	err := store.createStateInitializationMarker(ctx)
-	if errors.Is(err, errStateInitializationMarkerAlreadyExists) {
-		store.initializationMarkerEnsured = true
-		return false, nil
-	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, store.endpoint+stateInitializationMarkerPath(), nil)
 	if err != nil {
+		return false, fmt.Errorf("could not construct state initialization marker request")
+	}
+	if err := store.authorize(request); err != nil {
 		return false, err
+	}
+	response, err := store.client.Do(request)
+	if err != nil {
+		return false, fmt.Errorf("Kubernetes state initialization marker request failed: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+	if response.StatusCode < 200 || response.StatusCode > 299 {
+		return false, fmt.Errorf("Kubernetes state initialization marker returned HTTP status %d", response.StatusCode)
 	}
 	store.initializationMarkerEnsured = true
 	return true, nil
+}
+
+func (store *KubernetesStateStore) ensureStateInitializationMarker(ctx context.Context) error {
+	markerExists, err := store.stateInitializationMarkerExists(ctx)
+	if err != nil {
+		return err
+	}
+	if markerExists {
+		return nil
+	}
+	err = store.createStateInitializationMarker(ctx)
+	if errors.Is(err, errStateInitializationMarkerAlreadyExists) {
+		store.initializationMarkerEnsured = true
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	store.initializationMarkerEnsured = true
+	return nil
 }
 
 func (store *KubernetesStateStore) createStateInitializationMarker(ctx context.Context) error {
@@ -426,6 +454,10 @@ func (store *KubernetesStateStore) Save(ctx context.Context, state PersistentSta
 
 func statePath() string {
 	return "/api/v1/namespaces/" + monitorNamespace + "/configmaps/" + stateConfigMap
+}
+
+func stateInitializationMarkerPath() string {
+	return "/api/v1/namespaces/" + monitorNamespace + "/configmaps/" + stateInitializationMarker
 }
 
 func eventReason(key string) string {
