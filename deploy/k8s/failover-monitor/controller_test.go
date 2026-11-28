@@ -300,6 +300,67 @@ func TestRecordFailureAlertsIncludeOnlySafeCause(t *testing.T) {
 	}
 }
 
+func TestPatchFailureAlertDeduplicatesUntilSuccessfulPatch(t *testing.T) {
+	config := testConfig()
+	config.WritesEnabled = true
+	state := &memoryStateStore{state: PersistentState{Target: config.PagesTarget}}
+	client := &mutableRecordClient{
+		record: testRecord(config, config.PagesTarget),
+		patchErrors: []error{
+			errors.New("first simulated patch failure"),
+			errors.New("second simulated patch failure"),
+			nil,
+			errors.New("failback patch failure"),
+		},
+	}
+	var logs bytes.Buffer
+	controller, err := NewController(context.Background(), config, client, state, log.New(&logs, "", 0), NewMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := &recordingAlertSink{}
+	controller.alertSink = events
+
+	start := time.Now()
+	for attempt := 0; attempt < 3; attempt++ {
+		controller.observe(context.Background(), start.Add(time.Duration(attempt)*probeInterval), errors.New("probe failed"))
+	}
+	if got := events.count("record_patch_failed"); got != 1 {
+		t.Fatalf("first patch failure emitted %d Warning Events, want 1", got)
+	}
+
+	controller.retryRecordValidation(context.Background())
+	controller.observe(context.Background(), start.Add(3*probeInterval), errors.New("probe failed"))
+	if got := events.count("record_patch_failed"); got != 1 {
+		t.Fatalf("repeated patch failure emitted %d Warning Events, want 1", got)
+	}
+
+	controller.retryRecordValidation(context.Background())
+	controller.observe(context.Background(), start.Add(4*probeInterval), errors.New("probe failed"))
+	if client.record.Content != config.TunnelTarget {
+		t.Fatalf("successful patch target = %q, want tunnel target", client.record.Content)
+	}
+	if got := events.count("record_patch_failed"); got != 1 {
+		t.Fatalf("successful patch should not add a failure event, got %d", got)
+	}
+
+	controller.observe(context.Background(), start.Add(5*probeInterval), nil)
+	controller.observe(context.Background(), start.Add(5*probeInterval+failbackWindow), nil)
+	if client.record.Content != config.TunnelTarget {
+		t.Fatalf("failed failback changed target to %q", client.record.Content)
+	}
+	if got := events.count("record_patch_failed"); got != 2 {
+		t.Fatalf("patch failure after a successful patch emitted %d Warning Events, want 2 total", got)
+	}
+	controller.retryRecordValidation(context.Background())
+	if got := events.count("record_patch_failed"); got != 2 {
+		t.Fatalf("record validation cleared the deduplication state; events = %d, want 2", got)
+	}
+	if strings.Count(logs.String(), "event=record_patch_failed") != 2 {
+		t.Fatalf("patch failure logs do not match Warning Event deduplication: %s", logs.String())
+	}
+}
+
 func TestStartupValidationRetriesTransientFailures(t *testing.T) {
 	config := testConfig()
 	config.WritesEnabled = true
@@ -460,9 +521,10 @@ type memoryStateStore struct {
 }
 
 type mutableRecordClient struct {
-	record   DNSRecord
-	getCalls int
-	patched  []string
+	record      DNSRecord
+	getCalls    int
+	patched     []string
+	patchErrors []error
 }
 
 func (client *mutableRecordClient) GetRecord(context.Context) (DNSRecord, error) {
@@ -472,9 +534,35 @@ func (client *mutableRecordClient) GetRecord(context.Context) (DNSRecord, error)
 
 func (client *mutableRecordClient) PatchTarget(_ context.Context, target string) (DNSRecord, error) {
 	client.patched = append(client.patched, target)
+	if len(client.patchErrors) != 0 {
+		err := client.patchErrors[0]
+		client.patchErrors = client.patchErrors[1:]
+		if err != nil {
+			return DNSRecord{}, err
+		}
+	}
 	client.record.Content = target
 	client.record.Proxied = true
 	return client.record, nil
+}
+
+type recordingAlertSink struct {
+	keys []string
+}
+
+func (sink *recordingAlertSink) PublishWarning(_ context.Context, key, _ string) error {
+	sink.keys = append(sink.keys, key)
+	return nil
+}
+
+func (sink *recordingAlertSink) count(key string) int {
+	count := 0
+	for _, eventKey := range sink.keys {
+		if eventKey == key {
+			count++
+		}
+	}
+	return count
 }
 
 func (store *memoryStateStore) Load(context.Context) (PersistentState, error) {

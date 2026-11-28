@@ -174,7 +174,7 @@ func (controller *Controller) clearValidationAlerts() bool {
 		"record_read_failed", "record_invalid", "state_read_failed", "state_initialize_failed",
 		"state_reconcile_failed", "pending_state_invalid", "record_drift", "change_cap_state_invalid",
 		"record_read_before_write_failed", "record_invalid_before_write", "record_drift_before_write",
-		"state_pending_failed", "record_patch_failed", "record_patch_unverified", "state_write_failed",
+		"state_pending_failed", "record_patch_unverified", "state_write_failed",
 		"record_write_blocked",
 	} {
 		if controller.alerts[key] {
@@ -183,6 +183,14 @@ func (controller *Controller) clearValidationAlerts() bool {
 		}
 	}
 	return cleared
+}
+
+func (controller *Controller) clearAlert(key string) bool {
+	if !controller.alerts[key] {
+		return false
+	}
+	delete(controller.alerts, key)
+	return true
 }
 
 func (controller *Controller) Run(ctx context.Context, probe Probe) {
@@ -304,6 +312,9 @@ func (controller *Controller) switchTo(ctx context.Context, target, reason strin
 		controller.recordSafe = false
 		controller.alert("record_patch_unverified", "DNS record update response did not match the requested safe target")
 		return
+	}
+	if controller.clearAlert("record_patch_failed") {
+		controller.logger.Printf("level=info event=record_patch_recovered")
 	}
 
 	newState := PersistentState{
