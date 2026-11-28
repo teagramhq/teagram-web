@@ -427,6 +427,8 @@ jobs:
           ping: ${{ steps.kubeconfig.outputs.api_host }}
 
       - name: Verify deploy kubeconfig identity and permissions
+        env:
+          WEB_ORIGIN: ${{ needs.check-published-image-pin.outputs.origin }}
         run: |
           set -euo pipefail
 
@@ -453,9 +455,14 @@ jobs:
             exit 1
           fi
 
-          proxy_access="$(kubectl auth can-i get services/teagram-web --subresource=proxy -n teagram || true)"
-          if [[ "$proxy_access" != yes ]]; then
-            echo '::error::kubectl auth can-i get services/teagram-web --subresource=proxy -n teagram failed; expected yes'
+          if [[ "$WEB_ORIGIN" == pages ]]; then
+            proxy_access="$(kubectl auth can-i get services/teagram-web --subresource=proxy -n teagram || true)"
+            if [[ "$proxy_access" != yes ]]; then
+              echo '::error::kubectl auth can-i get services/teagram-web --subresource=proxy -n teagram failed; expected yes'
+              exit 1
+            fi
+          elif [[ "$WEB_ORIGIN" != k3s ]]; then
+            echo '::error::WEB_ORIGIN must be k3s or pages'
             exit 1
           fi
 

@@ -545,6 +545,9 @@ check_deploy_identity_guard_behavior() (
   expected_identity='system:serviceaccount:teagram:teagram-web-deployer'
   legacy_pin="$tmp/legacy-pin"
   mkdir -p "$legacy_pin"
+  query '.jobs.deploy-web.steps[] | select(.name == "Verify deploy kubeconfig identity and permissions") | .env.WEB_ORIGIN' >"$tmp/origin-env"
+  [[ "$(cat "$tmp/origin-env")" == '${{ needs.check-published-image-pin.outputs.origin }}' ]] ||
+    fail 'the deploy identity guard must receive the selected origin mode'
   query '.jobs.deploy-web.steps[] | select(.name == "Verify deploy kubeconfig identity and permissions") | .run' >"$tmp/guard.sh"
   [[ ! -e "$legacy_pin/.github/scripts/verify-deploy-identity.sh" ]] ||
     fail 'the legacy pin fixture must not contain the deploy identity guard script'
@@ -604,12 +607,17 @@ SH
   chmod +x "$tmp/bin/kubectl"
 
   run_identity_guard() {
-    local output="$1" status
+    local output="$1" status web_origin=pages variable
     shift
+    for variable in "$@"; do
+      if [[ "$variable" == TEST_WEB_ORIGIN=* ]]; then
+        web_origin="${variable#TEST_WEB_ORIGIN=}"
+      fi
+    done
     : >"$tmp/calls"
     if (
       cd "$legacy_pin"
-      env PATH="$tmp/bin:$PATH" TEST_KUBECTL_LOG="$tmp/calls" "$@" \
+      env PATH="$tmp/bin:$PATH" TEST_KUBECTL_LOG="$tmp/calls" WEB_ORIGIN="$web_origin" "$@" \
         bash "$tmp/guard.sh" >"$output" 2>&1
     ); then
       return 0
@@ -634,6 +642,21 @@ auth can-i create pods --subresource=portforward -n teagram
 EOF
   diff -u "$tmp/expected-calls" "$tmp/calls" >/dev/null ||
     fail 'the deploy identity guard must run each identity and permission check'
+
+  if ! run_identity_guard "$tmp/k3s-proxy-denied.log" TEST_WEB_ORIGIN=k3s \
+    TEST_IDENTITY="$expected_identity" TEST_SECRET_ACCESS=no TEST_POD_ACCESS=no TEST_PROXY_ACCESS=no \
+    TEST_POD_READ_ACCESS=no TEST_PORT_FORWARD_ACCESS=no; then
+    fail 'the default k3s deploy identity guard must pass when service proxy access is denied'
+  fi
+  cat >"$tmp/expected-k3s-calls" <<'EOF'
+auth whoami -o jsonpath={.status.userInfo.username}
+auth can-i get secrets -n teagram
+auth can-i create pods -n teagram
+auth can-i get pods -n teagram
+auth can-i create pods --subresource=portforward -n teagram
+EOF
+  diff -u "$tmp/expected-k3s-calls" "$tmp/calls" >/dev/null ||
+    fail 'the k3s deploy identity guard must not require service proxy access'
 
   if run_identity_guard "$tmp/whoami-failure.log" TEST_IDENTITY=unexpected; then
     fail 'the deploy identity guard accepted an unexpected kubeconfig identity'
@@ -671,7 +694,7 @@ EOF
   grep -Fq '::error::kubectl auth can-i create pods -n teagram failed' "$tmp/pods-command-error.log" ||
     fail 'a kubectl auth can-i pods error must name the failed check'
 
-  if run_identity_guard "$tmp/proxy-failure.log" TEST_PROXY_ACCESS=no; then
+  if run_identity_guard "$tmp/proxy-failure.log" TEST_WEB_ORIGIN=pages TEST_PROXY_ACCESS=no; then
     fail 'the deploy identity guard accepted a denied service proxy permission'
   fi
   grep -Fq '::error::kubectl auth can-i get services/teagram-web --subresource=proxy -n teagram failed' "$tmp/proxy-failure.log" ||
@@ -861,6 +884,7 @@ check_contract() {
     "$identity_guard_run" == *'system:serviceaccount:teagram:teagram-web-deployer'* &&
     "$identity_guard_run" == *'kubectl auth can-i get secrets -n teagram'* &&
     "$identity_guard_run" == *'kubectl auth can-i create pods -n teagram'* &&
+    "$identity_guard_run" == *'if [[ "$WEB_ORIGIN" == pages ]]'* &&
     "$identity_guard_run" == *'kubectl auth can-i get services/teagram-web --subresource=proxy -n teagram'* &&
     "$identity_guard_run" == *'kubectl auth can-i get pods -n teagram'* &&
     "$identity_guard_run" == *'kubectl auth can-i create pods --subresource=portforward -n teagram'* ]] ||

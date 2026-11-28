@@ -93,9 +93,10 @@ describe('requestText', () => {
 });
 
 describe('smokeK8sWeb', () => {
-  it('keeps root-relative app paths under a Kubernetes service proxy prefix', async() => {
+  it.each(['root-relative', 'Kubernetes-rewritten'])('keeps %s app paths under a Kubernetes service proxy prefix', async(pathStyle) => {
     const requests = [];
     const proxyPrefix = '/api/v1/namespaces/teagram/services/teagram-web/proxy/';
+    const scriptPath = pathStyle === 'Kubernetes-rewritten' ? `${proxyPrefix}assets/app.js` : '/assets/app.js';
     const server = createServer((request, response) => {
       requests.push(request.url);
       if(!request.url.startsWith(proxyPrefix)) {
@@ -106,7 +107,7 @@ describe('smokeK8sWeb', () => {
       const path = request.url.slice(proxyPrefix.length).split('?')[0];
       if(path === '') {
         response.writeHead(200, {'content-type': 'text/html'});
-        response.end('<script src="/assets/app.js"></script>');
+        response.end(`<script src="${scriptPath}"></script>`);
       } else if(path === 'assets/app.js') {
         response.writeHead(200, {'content-type': 'application/javascript'});
         response.end('const app = true;');
@@ -140,7 +141,7 @@ describe('smokeK8sWeb', () => {
       });
 
       expect(exitCode, stderr).toBe(0);
-      expect(stdout).toContain('/assets/app.js');
+      expect(stdout).toContain(`${proxyPrefix}assets/app.js`);
       expect(stderr).toBe('');
       expect(requests).toEqual([
         `${proxyPrefix}?deploy=${sourceCommit}`,

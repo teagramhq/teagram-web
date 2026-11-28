@@ -30,7 +30,10 @@ if(!scriptPath) {
   throw new Error('web root did not reference a JavaScript app bundle');
 }
 
-const bundleUrl = new URL(scriptPath.replace(/^\/+/, ''), baseUrl);
+const bundleUrl = new URL(scriptPath, baseUrl);
+if(bundleUrl.origin === baseUrl.origin && scriptPath.startsWith('/') && !scriptPath.startsWith(baseUrl.pathname)) {
+  bundleUrl.pathname = `${baseUrl.pathname}${scriptPath.replace(/^\/+/, '')}`;
+}
 const bundleResponse = await fetch(bundleUrl);
 if(!bundleResponse.ok) {
   throw new Error(`app bundle returned HTTP ${bundleResponse.status}: ${bundleUrl.pathname}`);
