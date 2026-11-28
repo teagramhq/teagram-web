@@ -84,6 +84,20 @@ async function openSandboxStory(page: Page, id: string, hideSidebar = false) {
   return page.locator('.popup.active').last();
 }
 
+async function expectV1StickerShareLink(page: Page, value: string, shortName: string) {
+  const url = new URL(value);
+  expect(url.origin).toBe('https://web.teagram.io');
+  expect(url.pathname).toBe('/');
+  expect(url.search).toBe('');
+
+  const decoded = await page.evaluate(async(fragment) => {
+    const moduleUrl = new URL('/src/lib/fragmentLink.ts', location.origin).href;
+    const {decodeFragmentLink} = await import(moduleUrl);
+    return decodeFragmentLink(fragment);
+  }, url.hash);
+  expect(decoded).toEqual({type: 6, shortName});
+}
+
 async function capturePopupScreenshot(page: Page, testInfo: TestInfo, name: string) {
   const path = testInfo.outputPath(`${name}.png`);
   await page.screenshot({path});
@@ -227,8 +241,10 @@ test('imports a folder pack and opens its shareable sticker set', async({page}, 
 
   const stickerPopup = page.locator('.popup-stickers.popup.active');
   await expect(stickerPopup.getByText('Imported Pack', {exact: true})).toBeVisible();
-  await expect(stickerPopup.locator('input[aria-label="Sticker pack link"]')).toHaveValue(
-    'https://teagram.test/addstickers/sandbox_imported'
+  await expectV1StickerShareLink(
+    page,
+    await stickerPopup.locator('input[aria-label="Sticker pack link"]').inputValue(),
+    'sandbox_imported'
   );
   await expect(stickerPopup.getByRole('button', {name: 'Copy Link'})).toBeVisible();
   await page.evaluate(() => window.popupSandbox.closePopups());
@@ -458,16 +474,17 @@ test('uses a sticker set short name error and only displays API error codes', as
   await capturePopupScreenshot(page, testInfo, 'sticker-import-generic-error');
 });
 
-test('copies an existing sticker set link using the configured server prefix', async({page, context}) => {
+test('copies an existing sticker set link using the canonical v1 format', async({page, context}) => {
   const stickerPopup = await openSandboxStory(page, 'stickers');
-  await expect(stickerPopup.locator('input[aria-label="Sticker pack link"]')).toHaveValue(
-    'https://teagram.test/addstickers/sandbox_stickers'
+  const shareLink = await stickerPopup.locator('input[aria-label="Sticker pack link"]').inputValue();
+  await expectV1StickerShareLink(
+    page,
+    shareLink,
+    'sandbox_stickers'
   );
   await context.grantPermissions(['clipboard-read', 'clipboard-write'], {origin: new URL(page.url()).origin});
   await stickerPopup.getByRole('button', {name: 'Copy Link'}).click();
-  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(
-    'https://teagram.test/addstickers/sandbox_stickers'
-  );
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(shareLink);
 });
 
 test('reports a share link lookup failure and hides its copy action', async({page}, testInfo) => {
