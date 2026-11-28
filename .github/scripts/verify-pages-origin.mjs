@@ -2,9 +2,11 @@ import http from 'node:http';
 import https from 'node:https';
 import {resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {RETIRED_VERSION_URLS} from './pages-paths.mjs';
 
 export const PAGES_HOST = 'web.teagram.io';
 export const VERSION_PATH = '/.well-known/teagram-web/source-commit.txt';
+export {RETIRED_VERSION_URLS};
 // These are GitHub Pages' documented IPv4 targets. k3s mode pins requests here
 // so verification cannot follow the public DNS record to the current origin.
 export const PAGES_IPS = [
@@ -21,7 +23,7 @@ function fail(message) {
   throw new Error(`[pages] ${message}`);
 }
 
-function requestText({protocol, host, ip, path, timeoutMs}) {
+function requestText({protocol, host, ip, path, timeoutMs, maxResponseBytes = 4096}) {
   const client = protocol === 'https:' ? https : http;
   const options = {
     protocol,
@@ -46,8 +48,8 @@ function requestText({protocol, host, ip, path, timeoutMs}) {
       let size = 0;
       response.on('data', (chunk) => {
         size += chunk.length;
-        if(size > 4096) {
-          request.destroy(Object.assign(new Error('version response is too large'), {code: 'ERR_RESPONSE_TOO_LARGE'}));
+        if(size > maxResponseBytes) {
+          request.destroy(Object.assign(new Error('Pages response is too large'), {code: 'ERR_RESPONSE_TOO_LARGE'}));
           return;
         }
         chunks.push(chunk);
@@ -75,6 +77,22 @@ function responseMatches(response, sourceCommit) {
 
 function requestPath(sourceCommit) {
   return `${VERSION_PATH}?deploy=${sourceCommit}`;
+}
+
+async function retiredVersionPathFailure({protocol, host, ip, sourceCommit, request, timeoutMs}) {
+  for(const path of RETIRED_VERSION_URLS) {
+    let response;
+    try {
+      response = await request({
+        protocol, host, ip, path: `${path}?deploy=${sourceCommit}`, timeoutMs,
+        maxResponseBytes: 65536
+      });
+    } catch(error) {
+      return `${path}: ${errorLabel(error)}`;
+    }
+    if(response?.status !== 404) return `${path} returned HTTP ${response?.status ?? 'unknown'}`;
+  }
+  return null;
 }
 
 function errorLabel(error) {
@@ -108,8 +126,15 @@ export async function verifyPagesOrigin({
         const response = await request({
           protocol: 'https:', host: PAGES_HOST, path, timeoutMs: requestTimeoutMs
         });
-        if(responseMatches(response, sourceCommit)) return {transport: 'https', ip: undefined};
-        lastResult = `HTTP ${response.status ?? 'unknown'}`;
+        if(responseMatches(response, sourceCommit)) {
+          const routeFailure = await retiredVersionPathFailure({
+            protocol: 'https:', host: PAGES_HOST, sourceCommit, request, timeoutMs: requestTimeoutMs
+          });
+          if(!routeFailure) return {transport: 'https', ip: undefined};
+          lastResult = routeFailure;
+        } else {
+          lastResult = `HTTP ${response.status ?? 'unknown'}`;
+        }
       } catch(error) {
         lastResult = errorLabel(error);
       }
@@ -119,8 +144,15 @@ export async function verifyPagesOrigin({
           const response = await request({
             protocol: 'https:', host: PAGES_HOST, ip, path, timeoutMs: requestTimeoutMs
           });
-          if(responseMatches(response, sourceCommit)) return {transport: 'https', ip};
-          lastResult = `HTTP ${response.status ?? 'unknown'} at ${ip}`;
+          if(responseMatches(response, sourceCommit)) {
+            const routeFailure = await retiredVersionPathFailure({
+              protocol: 'https:', host: PAGES_HOST, ip, sourceCommit, request, timeoutMs: requestTimeoutMs
+            });
+            if(!routeFailure) return {transport: 'https', ip};
+            lastResult = `${routeFailure} at ${ip}`;
+          } else {
+            lastResult = `HTTP ${response.status ?? 'unknown'} at ${ip}`;
+          }
           continue;
         } catch(error) {
           if(!isCertificateNotReady(error)) {
@@ -133,8 +165,15 @@ export async function verifyPagesOrigin({
           const response = await request({
             protocol: 'http:', host: PAGES_HOST, ip, path, timeoutMs: requestTimeoutMs
           });
-          if(responseMatches(response, sourceCommit)) return {transport: 'http', ip};
-          lastResult = `HTTP ${response.status ?? 'unknown'} at ${ip}`;
+          if(responseMatches(response, sourceCommit)) {
+            const routeFailure = await retiredVersionPathFailure({
+              protocol: 'http:', host: PAGES_HOST, ip, sourceCommit, request, timeoutMs: requestTimeoutMs
+            });
+            if(!routeFailure) return {transport: 'http', ip};
+            lastResult = `${routeFailure} at ${ip}`;
+          } else {
+            lastResult = `HTTP ${response.status ?? 'unknown'} at ${ip}`;
+          }
         } catch(error) {
           lastResult = `${errorLabel(error)} at ${ip}`;
         }

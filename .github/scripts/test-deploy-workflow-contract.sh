@@ -864,8 +864,11 @@ check_contract() {
   [[ "$pages_archive_run" == *'find "$RUNNER_TEMP/pages-site/.well-known" -type f'* &&
     "$pages_archive_run" == *'tar -tf "$RUNNER_TEMP/artifact.tar"'* &&
     "$pages_archive_run" == *'comm -23 "$expected" "$archived"'* &&
-    "$pages_archive_run" == *'./.well-known/teagram-web/version.txt'* ]] ||
-    fail 'the Pages artifact contract must verify the existing and generated hidden resources'
+    "$pages_archive_run" == *'./.well-known/teagram-web/source-commit.txt'* &&
+    "$pages_archive_run" == *'./.well-known/teagram-web/version.txt'* &&
+    "$pages_archive_run" == *'./.well-known/telegram-web/version.txt'* &&
+    "$pages_archive_run" == *'./404.html'* ]] ||
+    fail 'the Pages artifact contract must preserve allowed hidden resources, omit retired version paths, and include the app 404 page'
   [[ "$(query '[.jobs.deploy-pages.steps[] | select(.uses // "" | test("^actions/upload-pages-artifact@"))] | length')" == 1 &&
     "$(query '[.jobs.deploy-pages.steps[] | select(.uses // "" | test("^actions/deploy-pages@"))] | length')" == 1 &&
     "$pages_verify_run" == *'.github/scripts/verify-pages-origin.mjs verify'* &&

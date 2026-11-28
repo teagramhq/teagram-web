@@ -10,15 +10,16 @@ import {
 } from 'node:fs';
 import {dirname, join, resolve, sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {RETIRED_VERSION_PATHS, SOURCE_COMMIT_PATH} from './pages-paths.mjs';
 
-export const SOURCE_COMMIT_PATH = '.well-known/teagram-web/source-commit.txt';
 export const MAX_PAGES_SITE_BYTES = 1_000_000_000;
 
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
-const GENERATED_FILES = [SOURCE_COMMIT_PATH];
+const GENERATED_FILES = ['404.html', SOURCE_COMMIT_PATH];
+const RETIRED_VERSION_PATH_SET = new Set(RETIRED_VERSION_PATHS);
 
 function isForbiddenPagesRoute(path) {
-  return path === '404.html' || path === 'healthz' || path === 'invite' ||
+  return path === 'healthz' || path === 'invite' ||
     path === 'invite.html' || path.startsWith('invite/');
 }
 
@@ -87,14 +88,18 @@ function assertNoConflict(filesByPath, path, expectedContents) {
   }
 }
 
-function copyTree(sourceDirectory, outputDirectory) {
+function copyTree(sourceDirectory, outputDirectory, prefix = '') {
   mkdirSync(outputDirectory, {recursive: true});
   for(const entry of readdirSync(sourceDirectory, {withFileTypes: true})) {
     const sourcePath = join(sourceDirectory, entry.name);
     const outputPath = join(outputDirectory, entry.name);
+    const relativePath = prefix ? join(prefix, entry.name) : entry.name;
+    const imagePath = relativePath.split(sep).join('/');
+
+    if(RETIRED_VERSION_PATH_SET.has(imagePath)) continue;
 
     if(entry.isDirectory()) {
-      copyTree(sourcePath, outputPath);
+      copyTree(sourcePath, outputPath, relativePath);
     } else {
       copyFileSync(sourcePath, outputPath);
       chmodSync(outputPath, lstatSync(sourcePath).mode & 0o777);
@@ -154,7 +159,10 @@ export function preparePagesSite({sourceDirectory, outputDirectory, sourceCommit
     }
   }
 
+  const publishedImageFiles = imageFiles.filter((file) => !RETIRED_VERSION_PATH_SET.has(file.path));
   const commitContents = Buffer.from(`${sourceCommit}\n`);
+  const indexContents = readFileSync(indexFile.absolutePath);
+  assertNoConflict(imageFilesByPath, '404.html', indexContents);
   assertNoConflict(imageFilesByPath, SOURCE_COMMIT_PATH, commitContents);
 
   for(const file of imageFiles) {
@@ -162,9 +170,11 @@ export function preparePagesSite({sourceDirectory, outputDirectory, sourceCommit
   }
   const imageTreeSha256 = treeSha256(imageFiles);
   console.log(`pages_image_tree_sha256=${imageTreeSha256}`);
+  console.log(`pages_retired_version_paths=${RETIRED_VERSION_PATHS.join(',')}`);
 
   copyTree(source, output);
   const generatedContents = new Map([
+    ['404.html', indexContents],
     [SOURCE_COMMIT_PATH, commitContents]
   ]);
   for(const [path, contents] of generatedContents) {
@@ -176,7 +186,7 @@ export function preparePagesSite({sourceDirectory, outputDirectory, sourceCommit
 
   const pagesFiles = walkTree(output);
   const pagesFilesByPath = new Map(pagesFiles.map((file) => [file.path, file]));
-  for(const file of imageFiles) {
+  for(const file of publishedImageFiles) {
     const copiedFile = pagesFilesByPath.get(file.path);
     if(!copiedFile || copiedFile.sha256 !== file.sha256) {
       fail(`the Pages site does not match the image file: ${file.path}`);
@@ -190,16 +200,18 @@ export function preparePagesSite({sourceDirectory, outputDirectory, sourceCommit
     }
   }
 
-  const expectedPaths = new Set(imageFiles.map((file) => file.path));
+  const expectedPaths = new Set(publishedImageFiles.map((file) => file.path));
   for(const path of GENERATED_FILES) expectedPaths.add(path);
   if(pagesFiles.length !== expectedPaths.size || pagesFiles.some((file) => !expectedPaths.has(file.path))) {
     fail('the Pages site contains files outside the image tree and required routes');
   }
 
-  const preservedImageFiles = pagesFiles.filter((file) => imageFilesByPath.has(file.path));
+  const publishedImageFilePaths = new Set(publishedImageFiles.map((file) => file.path));
+  const preservedImageFiles = pagesFiles.filter((file) => publishedImageFilePaths.has(file.path));
   const preservedTreeSha256 = treeSha256(preservedImageFiles);
-  if(preservedTreeSha256 !== imageTreeSha256) {
-    fail('the copied Pages files do not match the audited image tree');
+  const publishedImageTreeSha256 = treeSha256(publishedImageFiles);
+  if(preservedTreeSha256 !== publishedImageTreeSha256) {
+    fail('the copied Pages files do not match the publishable image tree');
   }
 
   const bytes = pagesFiles.reduce((total, file) => total + file.size, 0);
@@ -208,16 +220,18 @@ export function preparePagesSite({sourceDirectory, outputDirectory, sourceCommit
   }
 
   const pagesTreeSha256 = treeSha256(pagesFiles);
-  console.log(`pages_image_tree_matches=true sha256=${preservedTreeSha256}`);
-  console.log(`pages_well_known_files=${preservedImageFiles.filter((file) => file.path.startsWith('.well-known/')).length}`);
+  console.log(`pages_image_files_match=true sha256=${preservedTreeSha256}`);
+  console.log(`pages_well_known_files=${pagesFiles.filter((file) => file.path.startsWith('.well-known/')).length}`);
   console.log(`pages_site_files=${pagesFiles.length}`);
   console.log(`pages_site_size_bytes=${bytes}`);
   console.log(`pages_site_tree_sha256=${pagesTreeSha256}`);
 
   return {
     imageFiles: imageFiles.map((file) => file.path),
+    publishedImageFiles: publishedImageFiles.map((file) => file.path),
     pagesFiles: pagesFiles.map((file) => file.path),
     imageTreeSha256,
+    publishedImageTreeSha256,
     preservedTreeSha256,
     pagesTreeSha256,
     bytes

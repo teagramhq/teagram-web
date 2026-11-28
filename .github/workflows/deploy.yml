@@ -656,11 +656,24 @@ jobs:
             echo '::error::the Pages archive omitted one or more .well-known resources'
             exit 1
           }
-          grep --fixed-strings --line-regexp --quiet './.well-known/teagram-web/version.txt' "$archived" || {
-            echo '::error::the Pages archive omitted the existing hidden version resource'
+          for retired_path in \
+            './.well-known/teagram-web/version.txt' \
+            './.well-known/telegram-web/version.txt'; do
+            if grep --fixed-strings --line-regexp --quiet "$retired_path" "$archived"; then
+              echo "::error::the Pages archive contains a retired hidden version resource: $retired_path"
+              exit 1
+            fi
+          done
+          grep --fixed-strings --line-regexp --quiet './.well-known/teagram-web/source-commit.txt' "$archived" || {
+            echo '::error::the Pages archive omitted the generated source commit marker'
             exit 1
           }
-          printf 'pages_archive_well_known=verified files=%s\n' "$(wc -l < "$expected" | tr -d ' ')"
+          grep --fixed-strings --line-regexp --quiet './404.html' "$archived" || {
+            echo '::error::the Pages archive omitted the application 404 page'
+            exit 1
+          }
+          printf 'pages_archive_well_known=verified files=%s retired_version_paths=omitted\n' \
+            "$(wc -l < "$expected" | tr -d ' ')"
 
       - name: Deploy the Pages site
         id: deployment

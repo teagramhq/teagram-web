@@ -9,10 +9,12 @@ import {
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {afterAll, describe, expect, it} from 'vitest';
-import {preparePagesSite, SOURCE_COMMIT_PATH} from '../.github/scripts/prepare-pages-site.mjs';
+import {preparePagesSite} from '../.github/scripts/prepare-pages-site.mjs';
+import {RETIRED_VERSION_PATHS, SOURCE_COMMIT_PATH} from '../.github/scripts/pages-paths.mjs';
 import {
   PAGES_HOST,
   PAGES_IPS,
+  RETIRED_VERSION_URLS,
   VERSION_PATH,
   verifyPagesOrigin
 } from '../.github/scripts/verify-pages-origin.mjs';
@@ -29,8 +31,11 @@ function temporaryDirectory() {
 function imageTree() {
   const source = join(temporaryDirectory(), 'image');
   mkdirSync(join(source, '.well-known', 'teagram-web'), {recursive: true});
+  mkdirSync(join(source, '.well-known', 'telegram-web'), {recursive: true});
   writeFileSync(join(source, 'index.html'), '<!doctype html><main>web</main>');
   writeFileSync(join(source, '.well-known', 'teagram-web', 'version.txt'), '2.2 (676)\n');
+  writeFileSync(join(source, '.well-known', 'telegram-web', 'version.txt'), 'retired\n');
+  writeFileSync(join(source, '.well-known', 'teagram-web', 'client.json'), '{"clients":[]}\n');
   return source;
 }
 
@@ -39,22 +44,25 @@ afterAll(() => {
 });
 
 describe('preparePagesSite', () => {
-  it('preserves hidden image files and adds only the source commit marker', () => {
+  it('generates the app 404, omits retired paths, and preserves other hidden files', () => {
     const source = imageTree();
     const output = join(temporaryDirectory(), 'site');
     const result = preparePagesSite({sourceDirectory: source, outputDirectory: output, sourceCommit});
 
+    expect(readFileSync(join(output, '404.html'))).toEqual(readFileSync(join(source, 'index.html')));
     expect(readFileSync(join(output, SOURCE_COMMIT_PATH), 'utf8')).toBe(`${sourceCommit}\n`);
-    expect(readFileSync(join(output, '.well-known', 'teagram-web', 'version.txt'), 'utf8')).toBe('2.2 (676)\n');
-    expect(result.imageTreeSha256).toBe(result.preservedTreeSha256);
-    expect(result.pagesFiles).toContain('.well-known/teagram-web/version.txt');
+    expect(readFileSync(join(output, '.well-known', 'teagram-web', 'client.json'), 'utf8')).toBe('{"clients":[]}\n');
+    expect(result.imageTreeSha256).not.toBe(result.preservedTreeSha256);
+    expect(result.pagesFiles).toContain('.well-known/teagram-web/client.json');
     expect(result.pagesFiles).toContain(SOURCE_COMMIT_PATH);
-    expect(result.pagesFiles).not.toContain('404.html');
+    expect(result.pagesFiles).toContain('404.html');
+    expect(result.pagesFiles).not.toContain(RETIRED_VERSION_PATHS[0].slice(1));
+    expect(result.pagesFiles).not.toContain(RETIRED_VERSION_PATHS[1].slice(1));
     expect(result.pagesFiles).not.toContain('healthz');
     expect(result.pagesFiles).not.toContain('invite');
     expect(result.pagesFiles).not.toContain('invite.html');
     expect(result.pagesFiles).not.toContain('invite/index.html');
-    expect(result.pagesFiles).toHaveLength(result.imageFiles.length + 1);
+    expect(result.pagesFiles).toHaveLength(result.imageFiles.length);
   });
 
   it('rejects symlinks before creating the Pages output', () => {
@@ -66,7 +74,7 @@ describe('preparePagesSite', () => {
       .toThrow(/symlink/);
   });
 
-  it.each(['404.html', 'healthz', 'invite', 'invite.html', 'invite/index.html'])('rejects an image route file at %s', (routePath) => {
+  it.each(['healthz', 'invite', 'invite.html', 'invite/index.html'])('rejects an image route file at %s', (routePath) => {
     const source = imageTree();
     const output = join(temporaryDirectory(), 'site');
     const routeFile = join(source, routePath);
@@ -89,7 +97,9 @@ describe('verifyPagesOrigin', () => {
         if(options.protocol === 'https:') {
           throw Object.assign(new Error('certificate hostname mismatch'), {code: 'ERR_TLS_CERT_ALTNAME_INVALID'});
         }
-        return {status: 200, body: `${sourceCommit}\n`};
+        return options.path.startsWith(VERSION_PATH)
+          ? {status: 200, body: `${sourceCommit}\n`}
+          : {status: 404, body: '<!doctype html><main>web</main>'};
       },
       now: () => 0,
       timeoutMs: 1000
@@ -98,7 +108,10 @@ describe('verifyPagesOrigin', () => {
     expect(result).toEqual({transport: 'http', ip: PAGES_IPS[0]});
     expect(requests.map(({protocol, host, ip, path}) => ({protocol, host, ip, path}))).toEqual([
       {protocol: 'https:', host: PAGES_HOST, ip: PAGES_IPS[0], path: `${VERSION_PATH}?deploy=${sourceCommit}`},
-      {protocol: 'http:', host: PAGES_HOST, ip: PAGES_IPS[0], path: `${VERSION_PATH}?deploy=${sourceCommit}`}
+      {protocol: 'http:', host: PAGES_HOST, ip: PAGES_IPS[0], path: `${VERSION_PATH}?deploy=${sourceCommit}`},
+      ...RETIRED_VERSION_URLS.map((path) => ({
+        protocol: 'http:', host: PAGES_HOST, ip: PAGES_IPS[0], path: `${path}?deploy=${sourceCommit}`
+      }))
     ]);
   });
 
@@ -110,7 +123,9 @@ describe('verifyPagesOrigin', () => {
       sourceCommit,
       request: async(options) => {
         requests.push(options);
-        return {status: 200, body: `${sourceCommit}\n`};
+        return options.path.startsWith(VERSION_PATH)
+          ? {status: 200, body: `${sourceCommit}\n`}
+          : {status: 404, body: '<!doctype html><main>web</main>'};
       },
       now: () => time,
       sleep: async(duration) => { time += duration; },
@@ -118,9 +133,34 @@ describe('verifyPagesOrigin', () => {
     });
 
     expect(result).toEqual({transport: 'https', ip: undefined});
-    expect(requests).toEqual([{
-      protocol: 'https:', host: PAGES_HOST, path: `${VERSION_PATH}?deploy=${sourceCommit}`, timeoutMs: 8000
-    }]);
+    expect(requests).toEqual([
+      {protocol: 'https:', host: PAGES_HOST, path: `${VERSION_PATH}?deploy=${sourceCommit}`, timeoutMs: 8000},
+      ...RETIRED_VERSION_URLS.map((path) => ({
+        protocol: 'https:', host: PAGES_HOST, path: `${path}?deploy=${sourceCommit}`, timeoutMs: 8000,
+        maxResponseBytes: 65536
+      }))
+    ]);
+  });
+
+  it('fails unless both retired version paths return 404', async() => {
+    const requests = [];
+    await expect(verifyPagesOrigin({
+      origin: 'pages',
+      sourceCommit,
+      request: async(options) => {
+        requests.push(options);
+        return options.path.startsWith(VERSION_PATH)
+          ? {status: 200, body: `${sourceCommit}\n`}
+          : {status: 200, body: '<!doctype html><main>web</main>'};
+      },
+      now: () => 0,
+      timeoutMs: 0
+    })).rejects.toThrow(`${RETIRED_VERSION_URLS[0]} returned HTTP 200`);
+
+    expect(requests.map(({path}) => path)).toEqual([
+      `${VERSION_PATH}?deploy=${sourceCommit}`,
+      `${RETIRED_VERSION_URLS[0]}?deploy=${sourceCommit}`
+    ]);
   });
 
   it('fails closed on Pages certificate errors', async() => {
