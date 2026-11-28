@@ -1,10 +1,13 @@
 import {beforeAll, describe, expect, it, vi} from 'vitest';
 import {webcrypto} from 'node:crypto';
+import {TELEGRAM_BOT_API_ORIGIN} from '@config/telegramBotApi';
 import {
+  ACTIVE_SERVER_ID_KEY,
   DISCOVERY_MAX_BYTES,
   DISCOVERY_TIMEOUT_MS,
   SERVER_CHOICE_KEY,
   SERVER_PINS_KEY,
+  SERVER_TARGET_KEY,
   cleanServerHost,
   fetchServerDiscovery,
   formatServerKeyId,
@@ -57,6 +60,12 @@ describe('custom server discovery', () => {
     expect(shouldPromptForServerSelection('web.teagram.io')).toBe(true);
     expect(shouldPromptForServerSelection('web.teagram.io', 'second-server.example')).toBe(false);
     expect(shouldPromptForServerSelection('teagram.tailaa4918.ts.net')).toBe(false);
+    const defaultBootstrapSources = getServerConnectSources('web.teagram.io');
+    expect(defaultBootstrapSources).toContain('https://server.teagram.io');
+    expect(defaultBootstrapSources).toContain(TELEGRAM_BOT_API_ORIGIN);
+    expect(defaultBootstrapSources).toContain('wss:');
+    expect(defaultBootstrapSources).not.toContain('wss://web.teagram.io');
+    expect(getServerConnectSources('demo.example')).toContain('wss://demo.example');
     expect(getServerConnectSources('demo.example', {
       mode: 'private',
       endpoint: 'wss://demo.example:2443/apiws'
@@ -191,7 +200,7 @@ describe('custom server discovery', () => {
     await expect(fetchServerDiscovery('demo.example', vi.fn(async() => oversized) as any)).rejects.toThrow(/too large/);
   });
 
-  it('resolves the default profile from its public discovery target and authentication settings', async() => {
+  it('resolves the existing default profile from the server discovery host', async() => {
     const advertisedDocument = {
       ...document,
       mtproto: {...document.mtproto, endpoint: 'server.teagram.io:443'},
@@ -199,38 +208,93 @@ describe('custom server discovery', () => {
       turnstile: {site_key: 'production-site-key'},
       demo: {guest_sign_up: true}
     };
-    const fetcher = vi.fn(async() => new Response(JSON.stringify(advertisedDocument)));
+    const fetcher = vi.fn(async(_url: string, _options: RequestInit) => new Response(JSON.stringify(advertisedDocument)));
+    const previousState = {
+      choice: localStorage.getItem(SERVER_CHOICE_KEY),
+      activeId: localStorage.getItem(ACTIVE_SERVER_ID_KEY),
+      target: localStorage.getItem(SERVER_TARGET_KEY),
+      pins: localStorage.getItem(SERVER_PINS_KEY)
+    };
 
-    const profile = await resolveServerProfile('web.teagram.io', fetcher as any);
-
-    expect(fetcher).toHaveBeenCalledWith(
-      'https://web.teagram.io/.well-known/teagramd/client',
-      expect.objectContaining({credentials: 'omit', redirect: 'error'})
-    );
-    expect(profile.id).toBe('default');
-    expect(profile.server.target).toMatchObject({endpoint: 'wss://server.teagram.io/apiws'});
-    expect(profile.server.turnstileSiteKey).toBe('production-site-key');
-    expect(profile.server.guestSignUpEnabled).toBe(true);
-    storeSavedServerTarget(profile.server);
-    expect(getSavedServerTarget('web.teagram.io')?.target).toMatchObject({endpoint: 'wss://server.teagram.io/apiws'});
-
-    const existingPins = localStorage.getItem(SERVER_PINS_KEY);
     try {
+      localStorage.removeItem(SERVER_CHOICE_KEY);
+      localStorage.removeItem(ACTIVE_SERVER_ID_KEY);
+      localStorage.removeItem(SERVER_TARGET_KEY);
+      localStorage.removeItem(SERVER_PINS_KEY);
+
+      const freshProfile = await resolveServerProfile('web.teagram.io', fetcher as any);
+      expect(freshProfile.id).toBe('default');
+      expect(freshProfile.pinState).toBe('first-use');
+      expect(fetcher).toHaveBeenNthCalledWith(
+        1,
+        'https://server.teagram.io/.well-known/teagramd/client',
+        expect.objectContaining({credentials: 'omit', redirect: 'error'})
+      );
+
+      const savedServer = await validateDiscoveryDocument('web.teagram.io', advertisedDocument);
+      localStorage.setItem(SERVER_CHOICE_KEY, 'web.teagram.io');
+      localStorage.setItem(ACTIVE_SERVER_ID_KEY, 'default');
+      storeSavedServerTarget(savedServer);
+      localStorage.setItem(SERVER_PINS_KEY, JSON.stringify({'web.teagram.io': savedServer.pin}));
+      const savedTarget = localStorage.getItem(SERVER_TARGET_KEY);
+      const savedPins = localStorage.getItem(SERVER_PINS_KEY);
+
+      const profile = await resolveServerProfile('web.teagram.io', fetcher as any);
+
+      expect(fetcher).toHaveBeenNthCalledWith(
+        2,
+        'https://server.teagram.io/.well-known/teagramd/client',
+        expect.objectContaining({credentials: 'omit', redirect: 'error'})
+      );
+      expect(profile.id).toBe('default');
+      expect(profile.pinState).toBe('match');
+      expect(profile.server.target).toMatchObject({endpoint: 'wss://server.teagram.io/apiws'});
+      expect(profile.server.turnstileSiteKey).toBe('production-site-key');
+      expect(profile.server.guestSignUpEnabled).toBe(true);
+      expect(getServerConnectSources('web.teagram.io', profile.server.target)).toEqual([
+        '\u0027self\u0027',
+        ...(new URL('https://web.teagram.io').origin !== location.origin ? ['https://web.teagram.io'] : []),
+        'wss://server.teagram.io/apiws',
+        'https://api.telegram.org'
+      ]);
+      expect(localStorage.getItem(SERVER_CHOICE_KEY)).toBe('web.teagram.io');
+      expect(localStorage.getItem(ACTIVE_SERVER_ID_KEY)).toBe('default');
+      expect(localStorage.getItem(SERVER_TARGET_KEY)).toBe(savedTarget);
+      expect(localStorage.getItem(SERVER_PINS_KEY)).toBe(savedPins);
+      expect(getSavedServerTarget('web.teagram.io')?.target).toMatchObject({endpoint: 'wss://server.teagram.io/apiws'});
+
       localStorage.setItem(SERVER_PINS_KEY, JSON.stringify({
         'web.teagram.io': {...profile.server.pin, endpoint: 'wss://old.server.teagram.io/apiws'}
       }));
       await expect(resolveServerProfile('web.teagram.io', fetcher as any)).resolves.toMatchObject({pinState: 'mismatch'});
-    } finally {
-      if(existingPins === null) localStorage.removeItem(SERVER_PINS_KEY);
-      else localStorage.setItem(SERVER_PINS_KEY, existingPins);
-    }
+      expect(fetcher.mock.calls.map(([url]) => url)).toEqual(Array(3).fill('https://server.teagram.io/.well-known/teagramd/client'));
 
-    const tailnetDocument = {
-      ...advertisedDocument,
-      websocket: {endpoint: 'wss://teagram.tailaa4918.ts.net/apiws'}
-    };
-    await expect(resolveServerProfile('web.teagram.io', vi.fn(async() => new Response(JSON.stringify(tailnetDocument))) as any))
-    .rejects.toThrow(/WebSocket endpoint host does not match/);
+      const tailnetDocument = {
+        ...advertisedDocument,
+        websocket: {endpoint: 'wss://teagram.tailaa4918.ts.net/apiws'}
+      };
+      await expect(resolveServerProfile('web.teagram.io', vi.fn(async() => new Response(JSON.stringify(tailnetDocument))) as any))
+      .rejects.toThrow(/WebSocket endpoint host does not match/);
+    } finally {
+      const restore = (key: string, value: string | null) => {
+        if(value === null) localStorage.removeItem(key);
+        else localStorage.setItem(key, value);
+      };
+      restore(SERVER_CHOICE_KEY, previousState.choice);
+      restore(ACTIVE_SERVER_ID_KEY, previousState.activeId);
+      restore(SERVER_TARGET_KEY, previousState.target);
+      restore(SERVER_PINS_KEY, previousState.pins);
+    }
+  });
+
+  it('does not fall back to the web host when default-server discovery fails', async() => {
+    const fetcher = vi.fn(async() => { throw new TypeError('network down'); });
+    await expect(resolveServerProfile('web.teagram.io', fetcher as any)).rejects.toThrow('network down');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledWith(
+      'https://server.teagram.io/.well-known/teagramd/client',
+      expect.objectContaining({credentials: 'omit', redirect: 'error'})
+    );
   });
 
   it('aborts a stalled discovery request after the timeout', async() => {
