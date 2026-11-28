@@ -15,7 +15,12 @@ export const SOURCE_COMMIT_PATH = '.well-known/teagram-web/source-commit.txt';
 export const MAX_PAGES_SITE_BYTES = 1_000_000_000;
 
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
-const GENERATED_FILES = ['404.html', 'healthz', SOURCE_COMMIT_PATH];
+const GENERATED_FILES = [SOURCE_COMMIT_PATH];
+
+function isForbiddenPagesRoute(path) {
+  return path === '404.html' || path === 'healthz' || path === 'invite' ||
+    path === 'invite.html' || path.startsWith('invite/');
+}
 
 function fail(message) {
   throw new Error(`[pages] ${message}`);
@@ -144,13 +149,12 @@ export function preparePagesSite({sourceDirectory, outputDirectory, sourceCommit
     if(file.path === 'teagram-web-image-pin.json' || file.path.startsWith('.github/')) {
       fail(`the image root contains a file that must not be published: ${file.path}`);
     }
+    if(isForbiddenPagesRoute(file.path)) {
+      fail(`the image root contains a file that must not be published as a Pages route: ${file.path}`);
+    }
   }
 
-  const indexContents = readFileSync(indexFile.absolutePath);
-  const healthContents = Buffer.from('ok');
   const commitContents = Buffer.from(`${sourceCommit}\n`);
-  assertNoConflict(imageFilesByPath, '404.html', indexContents);
-  assertNoConflict(imageFilesByPath, 'healthz', healthContents);
   assertNoConflict(imageFilesByPath, SOURCE_COMMIT_PATH, commitContents);
 
   for(const file of imageFiles) {
@@ -161,8 +165,6 @@ export function preparePagesSite({sourceDirectory, outputDirectory, sourceCommit
 
   copyTree(source, output);
   const generatedContents = new Map([
-    ['404.html', indexContents],
-    ['healthz', healthContents],
     [SOURCE_COMMIT_PATH, commitContents]
   ]);
   for(const [path, contents] of generatedContents) {

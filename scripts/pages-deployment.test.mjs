@@ -7,7 +7,7 @@ import {
   writeFileSync
 } from 'node:fs';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {dirname, join} from 'node:path';
 import {afterAll, describe, expect, it} from 'vitest';
 import {preparePagesSite, SOURCE_COMMIT_PATH} from '../.github/scripts/prepare-pages-site.mjs';
 import {
@@ -39,23 +39,22 @@ afterAll(() => {
 });
 
 describe('preparePagesSite', () => {
-  it('preserves hidden image files and adds only the Pages routes', () => {
+  it('preserves hidden image files and adds only the source commit marker', () => {
     const source = imageTree();
     const output = join(temporaryDirectory(), 'site');
     const result = preparePagesSite({sourceDirectory: source, outputDirectory: output, sourceCommit});
 
-    expect(readFileSync(join(output, '404.html'))).toEqual(readFileSync(join(source, 'index.html')));
-    expect(readFileSync(join(output, 'healthz'), 'utf8')).toBe('ok');
     expect(readFileSync(join(output, SOURCE_COMMIT_PATH), 'utf8')).toBe(`${sourceCommit}\n`);
     expect(readFileSync(join(output, '.well-known', 'teagram-web', 'version.txt'), 'utf8')).toBe('2.2 (676)\n');
     expect(result.imageTreeSha256).toBe(result.preservedTreeSha256);
-    expect(result.pagesFiles).toEqual(expect.arrayContaining([
-      '.well-known/teagram-web/version.txt',
-      '404.html',
-      'healthz',
-      SOURCE_COMMIT_PATH
-    ]));
-    expect(result.pagesFiles).toHaveLength(result.imageFiles.length + 3);
+    expect(result.pagesFiles).toContain('.well-known/teagram-web/version.txt');
+    expect(result.pagesFiles).toContain(SOURCE_COMMIT_PATH);
+    expect(result.pagesFiles).not.toContain('404.html');
+    expect(result.pagesFiles).not.toContain('healthz');
+    expect(result.pagesFiles).not.toContain('invite');
+    expect(result.pagesFiles).not.toContain('invite.html');
+    expect(result.pagesFiles).not.toContain('invite/index.html');
+    expect(result.pagesFiles).toHaveLength(result.imageFiles.length + 1);
   });
 
   it('rejects symlinks before creating the Pages output', () => {
@@ -67,13 +66,15 @@ describe('preparePagesSite', () => {
       .toThrow(/symlink/);
   });
 
-  it('rejects a conflicting deep-link fallback instead of changing the image file', () => {
+  it.each(['404.html', 'healthz', 'invite', 'invite.html', 'invite/index.html'])('rejects an image route file at %s', (routePath) => {
     const source = imageTree();
     const output = join(temporaryDirectory(), 'site');
-    writeFileSync(join(source, '404.html'), 'different');
+    const routeFile = join(source, routePath);
+    mkdirSync(dirname(routeFile), {recursive: true});
+    writeFileSync(routeFile, 'static route');
 
     expect(() => preparePagesSite({sourceDirectory: source, outputDirectory: output, sourceCommit}))
-      .toThrow(/different 404\.html/);
+      .toThrow(/must not be published as a Pages route/);
   });
 });
 

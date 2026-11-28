@@ -5,10 +5,11 @@ published as `ghcr.io/teagramhq/teagram-web`. The `Deploy.` workflow uses the
 image pin produced by a successful `master` publication and checks its source
 commit and artifact digest before rendering the production overlay in
 `deploy/k8s/`. The Pages job pulls that same pinned image, re-verifies its web
-root, and copies its files without rebuilding them. It adds a matching
-`404.html`, a static `healthz`, and `/.well-known/teagram-web/source-commit.txt`;
-the job preserves hidden `.well-known` files, prints the image file list and
-hash, and verifies the copied tree against that hash before upload.
+root, and copies its files without rebuilding them. It adds only
+`/.well-known/teagram-web/source-commit.txt`; the Pages artifact has no custom
+`404.html`, static `healthz`, or `/invite` route. The job preserves hidden
+`.well-known` files, prints the image file list and hash, and verifies the
+copied tree against that hash before upload.
 
 The production job retains its existing deployment identity checks, server-side
 dry run, rollback, and readiness checks. With `WEB_ORIGIN` unset or set to
