@@ -91,7 +91,7 @@ async function expectV1StickerShareLink(page: Page, value: string, shortName: st
   expect(url.search).toBe('');
 
   const decoded = await page.evaluate(async(fragment) => {
-    const moduleUrl = new URL('/src/lib/fragmentLink.ts', location.origin).href;
+    const moduleUrl = new URL('/src/lib/fragmentLinkDecode.ts', location.origin).href;
     const {decodeFragmentLink} = await import(moduleUrl);
     return decodeFragmentLink(fragment);
   }, url.hash);
