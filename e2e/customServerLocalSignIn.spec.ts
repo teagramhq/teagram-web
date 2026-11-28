@@ -1672,13 +1672,20 @@ test('isolates two server tabs when a custom server worker takes control', async
       expect(accountState.userId).toBe(userId);
       expect(accountState.authKeyDigests.length).toBeGreaterThan(0);
 
-      await page.locator('#column-left .sidebar-tools-button').click();
-      await page.locator('.btn-menu-item').filter({hasText: 'Saved Messages'}).click();
+      const toolsButton = page.locator('#column-left .sidebar-tools-button');
+      await toolsButton.click();
+      await expect(toolsButton).toHaveClass(/menu-open/, {timeout: 10_000});
+      const toolsMenu = page.locator('.btn-menu.active');
+      await expect(toolsMenu).toBeVisible({timeout: 10_000});
+      const savedMessagesMenuItem = toolsMenu.getByText('Saved Messages', {exact: true});
+      await expect(savedMessagesMenuItem).toBeVisible({timeout: 10_000});
+      await savedMessagesMenuItem.click();
+      await expect(toolsMenu).toBeHidden({timeout: 10_000});
       await expect.poll(() => page.evaluate(() => {
         const manager = (window as any).rootScope.managers.appImManager;
         return String(manager.chat.peerId) === String(manager.myId);
       }), {timeout: 30_000}).toBe(true);
-      await expect(page.locator('body')).toHaveClass(/has-chat/);
+      await expect(page.locator('body')).toHaveClass(/has-chat/, {timeout: 30_000});
 
       const hostAndPath = (requests: string[]) => requests.map((request) => {
         const {hostname, pathname} = new URL(request);
