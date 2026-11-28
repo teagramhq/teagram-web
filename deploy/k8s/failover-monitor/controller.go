@@ -330,6 +330,7 @@ func (controller *Controller) switchTo(ctx context.Context, target, reason strin
 		return
 	}
 	controller.history = recentChanges(controller.history, now)
+	controller.clearExpiredChangeCapAlerts()
 	if len(controller.history) >= maxChanges {
 		if controller.target == normalizedTunnelTarget(controller.config) {
 			controller.alert("change_cap_exhausted", "DNS change cap reached; holding the tunnel target")
@@ -465,6 +466,15 @@ func (controller *Controller) switchTo(ctx context.Context, target, reason strin
 	controller.logger.Printf("level=info event=dns_record_switched target=%s reason=%s", target, reason)
 	if len(recentChanges(controller.history, now)) >= maxChanges && target == normalizedTunnelTarget(controller.config) {
 		controller.alert("change_cap_exhausted", "DNS change cap reached; holding the tunnel target")
+	}
+}
+
+func (controller *Controller) clearExpiredChangeCapAlerts() {
+	if len(controller.history) < maxChanges {
+		controller.clearAlert("change_cap_exhausted")
+	}
+	if len(controller.history) < maxChanges-1 {
+		controller.clearAlert("change_cap_reserve")
 	}
 }
 

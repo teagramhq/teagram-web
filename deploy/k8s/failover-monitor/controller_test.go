@@ -132,6 +132,61 @@ func TestChangeCapHoldsTunnelTarget(t *testing.T) {
 	}
 }
 
+func TestChangeCapAlertsRepeatAfterWindowExpires(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		key     string
+		changes int
+	}{
+		{name: "exhausted", key: "change_cap_exhausted", changes: maxChanges},
+		{name: "reserve", key: "change_cap_reserve", changes: maxChanges - 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := testConfig()
+			config.InitialTarget = config.TunnelTarget
+			var logs bytes.Buffer
+			controller, err := NewController(context.Background(), config, nil, nil, log.New(&logs, "", 0), NewMetrics())
+			if err != nil {
+				t.Fatal(err)
+			}
+			events := &recordingAlertSink{}
+			controller.alertSink = events
+
+			firstAt := time.Now()
+			controller.history = capEpisodeChanges(firstAt, test.changes)
+			controller.switchTo(context.Background(), config.PagesTarget, "first cap episode", firstAt)
+			if got := events.count(test.key); got != 1 {
+				t.Fatalf("first cap episode emitted %d Warning Events, want 1", got)
+			}
+
+			recoveryAt := firstAt.Add(changeWindow + time.Minute)
+			controller.switchTo(context.Background(), config.PagesTarget, "expired cap episode", recoveryAt)
+			if controller.CurrentTarget() != config.PagesTarget {
+				t.Fatalf("expired cap did not allow failback, target = %q", controller.CurrentTarget())
+			}
+
+			secondAt := firstAt.Add(2*changeWindow + time.Minute)
+			controller.target = normalizedTunnelTarget(config)
+			controller.history = capEpisodeChanges(secondAt, test.changes)
+			controller.switchTo(context.Background(), config.PagesTarget, "second cap episode", secondAt)
+			if got := events.count(test.key); got != 2 {
+				t.Fatalf("second cap episode emitted %d Warning Events, want 2 total; logs=%s", got, logs.String())
+			}
+			if got := strings.Count(logs.String(), "event="+test.key); got != 2 {
+				t.Fatalf("cap alert logged %d times, want 2; logs=%s", got, logs.String())
+			}
+		})
+	}
+}
+
+func capEpisodeChanges(now time.Time, count int) []time.Time {
+	changes := make([]time.Time, count)
+	for index := range changes {
+		changes[index] = now.Add(-time.Duration(index+1) * 10 * time.Minute)
+	}
+	return changes
+}
+
 func TestFinalAllowedChangeLeavesMonitorOnTunnelAndAlerts(t *testing.T) {
 	config := testConfig()
 	var logs bytes.Buffer
