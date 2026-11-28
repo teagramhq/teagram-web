@@ -68,6 +68,9 @@ case "$1 $2" in
     ;;
   'port-forward --address')
     printf '%s\n' "$$" >"$PORT_FORWARD_PID_FILE"
+    if [[ "${TEST_FAILURE:-}" == fallback-probe ]]; then
+      printf 'kubectl port-forward: simulated connection reset\n' >&2
+    fi
     trap 'printf cleaned >"$PORT_FORWARD_CLEANUP_FILE"; exit 0' TERM INT
     while :; do read -r -t 1 _ || true; done
     ;;
@@ -254,6 +257,13 @@ SH
 
     grep -Fq 'the fallback route did not become ready' "$output" ||
       fail "$case_name did not report the failed fallback readiness probe"
+    if [[ "$expected_failure" == fallback-probe ]]; then
+      local port_forward_line fallback_failure_line
+      port_forward_line="$(grep -n -F 'kubectl port-forward: simulated connection reset' "$output" | cut -d: -f1 || true)"
+      fallback_failure_line="$(grep -n -F 'the fallback route did not become ready' "$output" | cut -d: -f1 || true)"
+      [[ -n "$port_forward_line" && -n "$fallback_failure_line" && "$port_forward_line" -lt "$fallback_failure_line" ]] ||
+        fail "$case_name did not print the port-forward diagnostic before failing the readiness probe"
+    fi
     if grep -Fq 'fallback=verified sha=' "$output"; then
       fail "$case_name printed the fallback verification marker after a failed probe"
     fi

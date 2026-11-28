@@ -195,7 +195,10 @@ if [[ "$verification_route" == fallback ]]; then
     fi
     sleep 1
   done
-  [[ "$fallback_ready" == true ]] || fail 'the fallback route did not become ready'
+  if [[ "$fallback_ready" != true ]]; then
+    cat "$port_forward_log" >&2
+    fail 'the fallback route did not become ready'
+  fi
 fi
 
 node .github/scripts/smoke-k8s-web.mjs "$smoke_url" "$deploy_sha" "$artifact_digest"

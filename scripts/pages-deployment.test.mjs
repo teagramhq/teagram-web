@@ -6,6 +6,7 @@ import {
   symlinkSync,
   writeFileSync
 } from 'node:fs';
+import {createServer} from 'node:http';
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {afterAll, describe, expect, it} from 'vitest';
@@ -16,6 +17,7 @@ import {
   PAGES_IPS,
   RETIRED_VERSION_URLS,
   VERSION_PATH,
+  requestText,
   verifyPagesOrigin
 } from '../.github/scripts/verify-pages-origin.mjs';
 
@@ -41,6 +43,28 @@ function imageTree() {
 
 afterAll(() => {
   for(const directory of temporaryDirectories) rmSync(directory, {recursive: true, force: true});
+});
+
+describe('requestText', () => {
+  it('connects to a pinned IPv4 address through a local HTTP server', async() => {
+    const server = createServer((_request, response) => response.end('pinned response\n'));
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+
+    try {
+      const result = await requestText({
+        protocol: 'http:', host: PAGES_HOST, ip: '127.0.0.1', port: server.address().port,
+        path: '/probe', timeoutMs: 1000
+      });
+      expect(result).toEqual({status: 200, body: 'pinned response\n'});
+    } finally {
+      await new Promise((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  });
 });
 
 describe('preparePagesSite', () => {
@@ -211,5 +235,15 @@ describe('verifyPagesOrigin', () => {
     })).rejects.toThrow(/timed out/);
 
     expect(requests.every((request) => request.protocol === 'https:' && request.ip === undefined)).toBe(true);
+  });
+
+  it('preserves unexpected errors from Pages requests', async() => {
+    await expect(verifyPagesOrigin({
+      origin: 'pages',
+      sourceCommit,
+      request: async() => { throw new Error('unexpected verifier bug'); },
+      now: () => 0,
+      timeoutMs: 0
+    })).rejects.toThrow('unexpected verifier bug');
   });
 });

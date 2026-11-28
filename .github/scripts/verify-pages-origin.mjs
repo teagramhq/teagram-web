@@ -23,12 +23,12 @@ function fail(message) {
   throw new Error(`[pages] ${message}`);
 }
 
-function requestText({protocol, host, ip, path, timeoutMs, maxResponseBytes = 4096}) {
+export function requestText({protocol, host, ip, port, path, timeoutMs, maxResponseBytes = 4096}) {
   const client = protocol === 'https:' ? https : http;
   const options = {
     protocol,
     hostname: host,
-    port: protocol === 'https:' ? 443 : 80,
+    port: port ?? (protocol === 'https:' ? 443 : 80),
     path,
     method: 'GET',
     agent: false,
@@ -39,6 +39,7 @@ function requestText({protocol, host, ip, path, timeoutMs, maxResponseBytes = 40
     }
   };
   if(ip) {
+    options.family = 4;
     options.lookup = (_hostname, _options, callback) => callback(null, ip, 4);
   }
 
@@ -96,7 +97,8 @@ async function retiredVersionPathFailure({protocol, host, ip, sourceCommit, requ
 }
 
 function errorLabel(error) {
-  return typeof error?.code === 'string' ? error.code : 'request-failed';
+  if(typeof error?.code === 'string') return error.code;
+  return typeof error?.message === 'string' ? error.message : String(error);
 }
 
 async function verifyPinnedPagesIps({sourceCommit, request, timeoutMs, allowHttpFallback}) {
