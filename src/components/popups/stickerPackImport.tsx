@@ -304,7 +304,7 @@ const StickerPackImportPopup = () => {
 
       const {me_url_prefix: prefix} = await managers.apiManager.getConfig();
       if(!setStickerSetLinkPrefix(prefix)) throw new Error('Invalid sticker set link prefix');
-      createStickerSetShareLink(prefix, shortName().trim(), type() === 'emoji');
+      await createStickerSetShareLink(prefix, shortName().trim(), type() === 'emoji');
 
       const files = validation().files;
       const finalName = shortName().trim();

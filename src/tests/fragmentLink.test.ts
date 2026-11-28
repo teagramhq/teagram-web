@@ -4,12 +4,11 @@ import {describe, expect, it, vi} from 'vitest';
 
 import {
   createFragmentLinkURL,
-  decodeFragmentLink,
-  dispatchDefaultServerFragmentLink,
   encodeFragmentLink,
   FragmentLinkError,
   type FragmentLink
 } from '@/lib/fragmentLink';
+import {decodeFragmentLink, dispatchDefaultServerFragmentLink} from '@/lib/fragmentLinkDecode';
 
 type VectorInput = {
   type: number,

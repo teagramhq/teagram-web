@@ -35,7 +35,7 @@ import rootScope from '@lib/rootScope';
 import {IconTsx} from '@components/iconTsx';
 import formatStarsAmount, {formatStarsAmountExact} from '@appManagers/utils/payments/formatStarsAmount';
 import {getStarsTransactionPresentation, getStarsTransactionMessagePeerId, getStarsTransactionFullAmount, starsTransactionProviders} from '@appManagers/utils/payments/starsTransaction';
-import {createFragmentLinkURL} from '@lib/fragmentLink';
+import {buildFragmentLinkURL} from '@helpers/fragmentLinkURL';
 import safeWindowOpen from '@helpers/dom/safeWindowOpen';
 import anchorCallback from '@helpers/dom/anchorCallback';
 import DEBUG from '@config/debug';
@@ -259,8 +259,8 @@ export default function showStarsPayPopup(options: StarsPayOptions): StarsPayHan
 
         const username = await rootScope.managers.appPeersManager.getPeerUsername(peerId);
         return username ?
-          createFragmentLinkURL({type: 2, username, messageId: BigInt(serverMsgId)}) :
-          createFragmentLinkURL({
+          await buildFragmentLinkURL({type: 2, username, messageId: BigInt(serverMsgId)}) :
+          await buildFragmentLinkURL({
             type: 3,
             channelId: BigInt(peerId.toChatId()),
             messageId: BigInt(serverMsgId)

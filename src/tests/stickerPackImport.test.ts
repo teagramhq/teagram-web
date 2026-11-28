@@ -4,7 +4,7 @@ import {readStickerPackZip, validateStickerPackFiles} from '@helpers/stickerPack
 import {BoundedZipInflate, readStickerPackZipBytes} from '@helpers/stickerPackImportZip';
 import {getStickerFileMimeType, isStickerPackImportEnabled} from '@helpers/stickerPackCommon';
 import {captureInitialStickerSetShareLink, createStickerSetShareLink, parseStickerSetShareLink, processInitialStickerSetShareLink, setStickerSetLinkPrefix} from '@helpers/stickerSetLink';
-import {decodeFragmentLink} from '@/lib/fragmentLink';
+import {decodeFragmentLink} from '@/lib/fragmentLinkDecode';
 
 const makeFile = (name: string, size: number) => new File([new Uint8Array(size)], name);
 
@@ -214,9 +214,9 @@ describe('sticker set share links', () => {
     }
   });
 
-  it('builds canonical v1 sticker and emoji links and still parses legacy routes', () => {
-    const stickers = createStickerSetShareLink('https://teagram.test/links/', 'funny_cats', false);
-    const emoji = createStickerSetShareLink('https://teagram.test/links/', 'emoji_pack', true);
+  it('builds canonical v1 sticker and emoji links and still parses legacy routes', async() => {
+    const stickers = await createStickerSetShareLink('https://teagram.test/links/', 'funny_cats', false);
+    const emoji = await createStickerSetShareLink('https://teagram.test/links/', 'emoji_pack', true);
 
     expect(stickers).toBe('https://web.teagram.io/#~Rg-jJAT_640');
     expect(emoji).toBe('https://web.teagram.io/#~Rw6FK8h0mt0');

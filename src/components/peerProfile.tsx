@@ -65,7 +65,8 @@ import {showPeerReport} from '@components/popups/reportAd';
 import CommunityPeerDialogList
 from '@components/communities/communityPeerDialogList';
 import getPeerId from '@appManagers/utils/peers/getPeerId';
-import {createFragmentLinkURL} from '@lib/fragmentLink';
+import {buildFragmentLinkURL} from '@helpers/fragmentLinkURL';
+import type {FragmentLink} from '@lib/fragmentLink';
 
 keepMe(ripple);
 
@@ -988,7 +989,7 @@ PeerProfile.Link = () => {
   const context = useContext(PeerProfileContext);
   const {i18n, I18n, toast, showMyQrCodePopup} = useHotReloadGuard();
 
-  const toFill = createMemo<Partial<{url: string, also: JSX.Element, isPrivate: boolean}>>(() => {
+  const toFill = createMemo<Partial<{url: string, link: FragmentLink, also: JSX.Element, isPrivate: boolean}>>(() => {
     if(context.peerId.isUser()) {
       return;
     }
@@ -997,15 +998,15 @@ PeerProfile.Link = () => {
     if(context.isTopic) {
       const threadId = getServerMessageId(context.threadId);
       const username = usernames[0];
-      const url = username ?
-        createFragmentLinkURL({type: 2, username, messageId: BigInt(threadId)}) :
-        createFragmentLinkURL({type: 3, channelId: BigInt(context.peerId.toChatId()), messageId: BigInt(threadId)});
-      return {url, isPrivate: !username};
+      const link: FragmentLink = username ?
+        {type: 2, username, messageId: BigInt(threadId)} :
+        {type: 3, channelId: BigInt(context.peerId.toChatId()), messageId: BigInt(threadId)};
+      return {link, isPrivate: !username};
     }
 
     if(usernames.length) {
       return {
-        url: createFragmentLinkURL({type: 1, username: usernames[0]}),
+        link: {type: 1, username: usernames[0]},
         also: getUsernamesAlso(usernames)
       };
     }
@@ -1018,8 +1019,12 @@ PeerProfile.Link = () => {
     }
   });
 
-  const onClick = () => {
-    const url = toFill().url;
+  // Built links come from a lazily loaded encoder, so the row shows them once it arrives.
+  const [builtUrl] = createResource(() => toFill()?.link, (link) => buildFragmentLinkURL(link));
+  const url = () => toFill().url ?? builtUrl();
+
+  const onClick = async() => {
+    const url = toFill().url ?? await buildFragmentLinkURL(toFill().link);
     copyTextToClipboard(url);
     // Promise.resolve(appProfileManager.getChatFull(this.peerId.toChatId())).then((chatFull) => {
     // copyTextToClipboard(chatFull.exported_invite.link);
@@ -1041,7 +1046,7 @@ PeerProfile.Link = () => {
         }}
       >
         <Row.Icon icon="link_filled" />
-        <Row.Title>{toFill().url}</Row.Title>
+        <Row.Title>{url()}</Row.Title>
         <Row.Subtitle>{toFill().also || i18n('SetUrlPlaceholder')}</Row.Subtitle>
         <PeerProfile.QrButton />
       </Row>

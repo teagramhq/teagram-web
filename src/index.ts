@@ -7,12 +7,9 @@
 import '@helpers/dom/previewUnfreeze';
 import '@helpers/dom/previewRaf';
 import {
-  restorePrivateUsernameInviteSecretForRetry,
-  restorePrivateUsernameV1InviteSecretForRetry,
   takePrivateUsernameInviteSecretFromFragment,
-  takePrivateUsernameV1InviteSecretFromFragment
+  takePrivateUsernameV1InviteFragment
 } from '@/pages/privateUsernameInvite';
-import {handleSignedInInviteLink} from '@/pages/privateUsernameInviteFlow';
 import '@helpers/stickerSetLink';
 
 import App from '@config/app';
@@ -439,6 +436,12 @@ if(import.meta.env.DEV) {
 
 const onDocumentReady = async() => {
   const perf = performance.now();
+  const v1InviteFragment = takePrivateUsernameV1InviteFragment();
+  if(v1InviteFragment) {
+    // The sign-in card reads the secret synchronously, so it is decoded before any page mounts.
+    const {resolvePrivateUsernameV1InviteSecret} = await import('@/pages/privateUsernameInviteV1');
+    resolvePrivateUsernameV1InviteSecret(v1InviteFragment);
+  }
   randomlyChooseVersionFromSearch();
   setSidebarLeftWidth();
   toggleAttributePolyfill();
@@ -790,15 +793,8 @@ const onDocumentReady = async() => {
   }
 
   if(authState._ === 'authStateSignedIn') {
-    const v1InviteSecret = takePrivateUsernameV1InviteSecretFromFragment();
     const inviteSecret = takePrivateUsernameInviteSecretFromFragment();
-    if(v1InviteSecret) {
-      if(getRuntimeServerId() === 'default') void handleSignedInInviteLink(v1InviteSecret, 'v1').catch(() => {
-        toastNew({langPackKey: restorePrivateUsernameV1InviteSecretForRetry(v1InviteSecret) ? 'Teagram.Invite.Retry' : 'Teagram.Invite.RetryUnavailable'});
-      });
-    } else if(inviteSecret) void handleSignedInInviteLink(inviteSecret).catch(() => {
-      toastNew({langPackKey: restorePrivateUsernameInviteSecretForRetry(inviteSecret) ? 'Teagram.Invite.Retry' : 'Teagram.Invite.RetryUnavailable'});
-    });
+    if(v1InviteFragment || inviteSecret) void import('@/pages/privateUsernameInviteFlow').then(({handleSignedInInviteLinks}) => handleSignedInInviteLinks(inviteSecret));
   }
 };
 

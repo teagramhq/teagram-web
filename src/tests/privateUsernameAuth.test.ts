@@ -5,12 +5,22 @@ import {authenticatePrivateUsername, isPrivateUsername, isPrivateUsernameCredent
 import {TURNSTILE_QA_BYPASS_LOCAL_STORAGE_KEY} from '@/pages/turnstileSignup';
 import {
   capturePrivateUsernameInviteSecretFromFragment,
-  restorePrivateUsernameV1InviteSecretForRetry,
   restorePrivateUsernameInviteSecretForRetry,
   storePrivateUsernameInviteSecretForAccountSwitch,
-  takePrivateUsernameV1InviteSecretFromFragment,
+  takePrivateUsernameV1InviteFragment,
   takePrivateUsernameInviteSecretFromFragment
 } from '@/pages/privateUsernameInvite';
+import {
+  resolvePrivateUsernameV1InviteSecret,
+  restorePrivateUsernameV1InviteSecretForRetry,
+  takePrivateUsernameV1InviteSecretFromFragment
+} from '@/pages/privateUsernameInviteV1';
+
+const takeV1InviteSecret = () => {
+  const fragment = takePrivateUsernameV1InviteFragment();
+  if(fragment) resolvePrivateUsernameV1InviteSecret(fragment);
+  return takePrivateUsernameV1InviteSecretFromFragment();
+};
 
 const USERNAME = 'Alice_123';
 const SENT_CODE = {
@@ -53,7 +63,7 @@ describe('private username sign-in', () => {
     expect(window.location.search).toBe('?keep=1');
     expect(window.location.hash).toBe('');
     expect(window.sessionStorage.getItem('teagram-invite-secret')).toBeNull();
-    expect(takePrivateUsernameV1InviteSecretFromFragment()).toBe(secret);
+    expect(takeV1InviteSecret()).toBe(secret);
     expect(takePrivateUsernameInviteSecretFromFragment()).toBeUndefined();
   });
 
@@ -64,7 +74,7 @@ describe('private username sign-in', () => {
 
     expect(window.location.search).toBe('?keep=1');
     expect(window.location.hash).toBe('');
-    expect(takePrivateUsernameV1InviteSecretFromFragment()).toBeUndefined();
+    expect(takeV1InviteSecret()).toBeUndefined();
   });
 
   it('keeps a v1 retry secret in memory without reading browser storage', () => {

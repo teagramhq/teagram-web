@@ -19,7 +19,7 @@ vi.mock('@config/serverContext', async(importOriginal) => ({
   getRuntimeServerId: () => 'default'
 }));
 
-import {decodeFragmentLink} from '@/lib/fragmentLink';
+import {decodeFragmentLink} from '@/lib/fragmentLinkDecode';
 import {handleSignedInInviteLink} from '@/pages/privateUsernameInviteFlow';
 
 describe('v1 signup invite flow', () => {

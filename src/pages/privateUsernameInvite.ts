@@ -1,41 +1,10 @@
 const INVITE_SECRET_PATTERN = /^[\da-f]{64}$/i;
 const INVITE_SECRET_SESSION_KEY = 'teagram-invite-secret';
-const FRAGMENT_LINK_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+// Version 1, type 5 (invite), with or without a host: the first two code characters.
+const V1_INVITE_PREFIX = /^#~[RZ][Q-Za-f]/;
 
 let inviteSecretFromFragment: string | undefined;
-let v1InviteSecretFromFragment: string | undefined;
-
-function fragmentLinkType(fragment: string) {
-  if(!fragment.startsWith('#~')) return;
-  const encoded = fragment.slice(2);
-  if(encoded.length < 2) return;
-
-  const high = FRAGMENT_LINK_ALPHABET.indexOf(encoded[0]);
-  const low = FRAGMENT_LINK_ALPHABET.indexOf(encoded[1]);
-  if(high < 0 || low < 0) return;
-  return ((high << 2) | (low >> 4)) & 0x1f;
-}
-
-function decodeV1InviteSecret(fragment: string) {
-  const encoded = fragment.slice(2);
-  if(!encoded || !/^[A-Za-z0-9_-]+$/.test(encoded)) return;
-
-  let binary: string;
-  try {
-    const standard = encoded.replace(/-/g, '+').replace(/_/g, '/');
-    binary = atob(standard + '='.repeat((4 - standard.length % 4) % 4));
-  } catch{
-    return;
-  }
-
-  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-  const canonical = btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-  if(canonical !== encoded || bytes.length !== 33) return;
-
-  const header = bytes[0];
-  if((header >> 6) !== 1 || (header & 0x1f) !== 5 || (header & 0x20) !== 0) return;
-  return Array.from(bytes.slice(1), (byte) => byte.toString(16).padStart(2, '0')).join('');
-}
+let v1InviteFragment: string | undefined;
 
 function clearFragment() {
   window.history.replaceState(
@@ -62,9 +31,17 @@ export function capturePrivateUsernameInviteSecretFromFragment() {
     return;
   }
 
-  if(fragmentLinkType(fragment) !== 5) return;
+  if(!V1_INVITE_PREFIX.test(fragment)) return;
+  // The address bar is cleared and the raw code is held here before any other code runs;
+  // the strict decoder is a separate chunk, so it only loads when an invite link arrives.
   clearFragment();
-  v1InviteSecretFromFragment = decodeV1InviteSecret(fragment);
+  v1InviteFragment = fragment;
+}
+
+export function takePrivateUsernameV1InviteFragment() {
+  const fragment = v1InviteFragment;
+  v1InviteFragment = undefined;
+  return fragment;
 }
 
 export function takePrivateUsernameInviteSecretFromFragment() {
@@ -80,18 +57,6 @@ export function takePrivateUsernameInviteSecretFromFragment() {
 
   if(secret && !INVITE_SECRET_PATTERN.test(secret)) return;
   return secret;
-}
-
-export function takePrivateUsernameV1InviteSecretFromFragment() {
-  const inviteValue = v1InviteSecretFromFragment;
-  v1InviteSecretFromFragment = undefined;
-  return inviteValue;
-}
-
-export function restorePrivateUsernameV1InviteSecretForRetry(secret: string) {
-  if(!INVITE_SECRET_PATTERN.test(secret)) return false;
-  v1InviteSecretFromFragment = secret.toLowerCase();
-  return true;
 }
 
 export function storePrivateUsernameInviteSecretForAccountSwitch(secret: string) {

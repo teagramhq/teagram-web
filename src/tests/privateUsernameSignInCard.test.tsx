@@ -159,8 +159,17 @@ import PrivateSignInCard from '@/pages/cards/PrivateSignInCard';
 import {clearPrivateUsernameLogin, isPrivateUsernameLogin} from '@/pages/privateUsernameLoginState';
 import {
   capturePrivateUsernameInviteSecretFromFragment,
-  takePrivateUsernameInviteSecretFromFragment
+  takePrivateUsernameInviteSecretFromFragment,
+  takePrivateUsernameV1InviteFragment
 } from '@/pages/privateUsernameInvite';
+import {resolvePrivateUsernameV1InviteSecret} from '@/pages/privateUsernameInviteV1';
+
+// Mirrors the page start: the fragment is stashed on load, then decoded before the card mounts.
+const captureV1InviteSecret = () => {
+  capturePrivateUsernameInviteSecretFromFragment();
+  const fragment = takePrivateUsernameV1InviteFragment();
+  if(fragment) resolvePrivateUsernameV1InviteSecret(fragment);
+};
 import {encodeFragmentLink} from '@/lib/fragmentLink';
 import {
   SERVER_CHOICE_KEY,
@@ -918,7 +927,7 @@ describe('private username sign-in card', () => {
       type: 5,
       secret: Uint8Array.from({length: 32}, (_, index) => index)
     })}`);
-    capturePrivateUsernameInviteSecretFromFragment();
+    captureV1InviteSecret();
     mocks.getAppConfig.mockResolvedValue({registration_mode: 'closed'});
     mocks.invokeApi
     .mockResolvedValueOnce(SENT_CODE)
@@ -1072,7 +1081,7 @@ describe('private username sign-in card', () => {
       type: 5,
       secret: Uint8Array.from({length: 32}, (_, index) => index)
     })}`);
-    capturePrivateUsernameInviteSecretFromFragment();
+    captureV1InviteSecret();
     mocks.getAppConfig.mockResolvedValue({registration_mode: 'invite'});
 
     mount();

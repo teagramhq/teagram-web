@@ -2,14 +2,14 @@ import {toastNew} from '@components/toast';
 import {MAX_ACCOUNTS_FREE, MAX_ACCOUNTS_PREMIUM} from '@lib/accounts/constants';
 import AccountController from '@lib/accounts/accountController';
 import apiManagerProxy from '@lib/apiManagerProxy';
-import {getActiveServerHost} from '@config/serverContext';
+import {getActiveServerHost, getRuntimeServerId} from '@config/serverContext';
 import {encodeFragmentLink, fromHex} from '@lib/fragmentLink';
 
 import {
   restorePrivateUsernameInviteSecretForRetry,
-  restorePrivateUsernameV1InviteSecretForRetry,
   storePrivateUsernameInviteSecretForAccountSwitch
 } from '@/pages/privateUsernameInvite';
+import {restorePrivateUsernameV1InviteSecretForRetry, takePrivateUsernameV1InviteSecretFromFragment} from '@/pages/privateUsernameInviteV1';
 
 type InviteSource = 'legacy' | 'v1';
 
@@ -66,5 +66,19 @@ export async function handleSignedInInviteLink(inviteSecret: string, source: Inv
     } else {
       showInviteRetryMessage();
     }
+  }
+}
+
+export async function handleSignedInInviteLinks(legacySecret?: string) {
+  const v1Secret = takePrivateUsernameV1InviteSecretFromFragment();
+  if(v1Secret) {
+    if(getRuntimeServerId() !== 'default') return;
+    await handleSignedInInviteLink(v1Secret, 'v1').catch(() => {
+      toastNew({langPackKey: restorePrivateUsernameV1InviteSecretForRetry(v1Secret) ? 'Teagram.Invite.Retry' : 'Teagram.Invite.RetryUnavailable'});
+    });
+  } else if(legacySecret) {
+    await handleSignedInInviteLink(legacySecret).catch(() => {
+      toastNew({langPackKey: restorePrivateUsernameInviteSecretForRetry(legacySecret) ? 'Teagram.Invite.Retry' : 'Teagram.Invite.RetryUnavailable'});
+    });
   }
 }

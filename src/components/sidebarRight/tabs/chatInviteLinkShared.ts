@@ -6,7 +6,7 @@ import lottieLoader from '@lib/lottie/lottieLoader';
 import rootScope from '@lib/rootScope';
 import hasRights from '@lib/appManagers/utils/chats/hasRights';
 import apiManagerProxy from '@lib/apiManagerProxy';
-import {createFragmentLinkURL} from '@lib/fragmentLink';
+import {buildFragmentLinkURL} from '@helpers/fragmentLinkURL';
 import AppSelectPeers from '@components/appSelectPeers';
 import {InviteLink} from '@components/sidebarLeft/tabs/inviteLink';
 
@@ -54,8 +54,12 @@ export class ChatInviteLink extends InviteLink {
 
   public setChatInvite(chatInvite: ChatInvite | string) {
     const isUsername = typeof(chatInvite) === 'string';
-    this.setUrl(typeof(chatInvite) === 'string' ?
-      createFragmentLinkURL({type: 1, username: chatInvite}) : chatInvite.link);
+    if(typeof(chatInvite) === 'string') {
+      const username = chatInvite;
+      void buildFragmentLinkURL({type: 1, username}).then((url) => this.setUrl(url));
+    } else {
+      this.setUrl(chatInvite.link);
+    }
 
     if(this.subtitle) {
       if(!isUsername && chatInvite?.usage) {

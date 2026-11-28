@@ -196,7 +196,7 @@ export default function showStickersPopup(
       try {
         const config = await managers.apiManager.getConfig();
         if(!setStickerSetLinkPrefix(config.me_url_prefix)) throw new Error('Invalid sticker set link prefix');
-        setShareLinks(rawSets.map((set) => createStickerSetShareLink(config.me_url_prefix, set.set.short_name, !!isEmojis)));
+        setShareLinks(await Promise.all(rawSets.map((set) => createStickerSetShareLink(config.me_url_prefix, set.set.short_name, !!isEmojis))));
       } catch(err) {
         stickersPopupLogger.error('Could not create sticker set share links', err);
         setShareLinks([]);

@@ -109,8 +109,6 @@ import LottiePlayer from '@lib/lottie/lottiePlayer';
 import PopupGiftPremium from '@components/popups/giftPremium';
 import internalLinkProcessor from '@lib/internalLinkProcessor';
 import {INTERNAL_LINK_TYPE} from '@lib/internalLink';
-import {dispatchDefaultServerFragmentLink, encodeBase64Url, toHex as fragmentBytesToHex, type FragmentLink} from '@lib/fragmentLink';
-import {restorePrivateUsernameV1InviteSecretForRetry} from '@/pages/privateUsernameInvite';
 import {createStoriesViewerWithPeer} from '@components/stories/viewer';
 import type {CustomEmojiRendererElement} from '@lib/customEmoji/renderer';
 import type {ChatInviteJoinWebView} from '@appManagers/appChatsManager';
@@ -1901,7 +1899,8 @@ export class AppImManager extends EventListenerBase<{
         `${window.location.pathname}${window.location.search}`
       );
       appNavigationController.overrideHash('');
-      dispatchDefaultServerFragmentLink(hash, (link) => this.processV1FragmentLink(link));
+      // The decoder is a separate chunk: it stays off the startup path until a fragment link arrives.
+      void import('@lib/fragmentLinkOpen').then(({openFragmentLink}) => openFragmentLink(hash)).catch(() => {});
       return;
     }
 
@@ -2007,47 +2006,6 @@ export class AppImManager extends EventListenerBase<{
     // appNavigationController.replaceState();
     // location.hash = '';
   };
-
-  private processV1FragmentLink(link: FragmentLink) {
-    switch(link.type) {
-      case 1:
-        return internalLinkProcessor.processMessageLink({
-          _: INTERNAL_LINK_TYPE.MESSAGE,
-          domain: link.username
-        });
-      case 2:
-        return internalLinkProcessor.processMessageLink({
-          _: INTERNAL_LINK_TYPE.MESSAGE,
-          domain: link.username,
-          post: link.messageId.toString()
-        });
-      case 3:
-        return internalLinkProcessor.processPrivatePostLink({
-          _: INTERNAL_LINK_TYPE.PRIVATE_POST,
-          channel: link.channelId.toString(),
-          post: link.messageId.toString()
-        });
-      case 4:
-        return internalLinkProcessor.processJoinChatLink({
-          _: INTERNAL_LINK_TYPE.JOIN_CHAT,
-          invite: encodeBase64Url(link.hash)
-        });
-      case 5: {
-        const secret = fragmentBytesToHex(link.secret);
-        return import('@/pages/privateUsernameInviteFlow')
-        .then(({handleSignedInInviteLink}) => handleSignedInInviteLink(secret, 'v1'))
-        .catch(() => {
-          toastNew({langPackKey: restorePrivateUsernameV1InviteSecretForRetry(secret) ? 'Teagram.Invite.Retry' : 'Teagram.Invite.RetryUnavailable'});
-        });
-      }
-      case 6:
-      case 7:
-        return internalLinkProcessor.processStickerSetLink({
-          _: link.type === 7 ? INTERNAL_LINK_TYPE.EMOJI_SET : INTERNAL_LINK_TYPE.STICKER_SET,
-          set: link.shortName
-        });
-    }
-  }
 
   public onSponsoredBoxClick = (message: Message.message) => {
     const sponsoredMessage = message.sponsoredMessage;

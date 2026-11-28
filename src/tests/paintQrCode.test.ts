@@ -34,7 +34,7 @@ describe('paintQrCode', () => {
     expect(result.canvas.parentElement).toBe(host);
   });
 
-  it('encodes a username QR as the canonical v1 profile link', () => {
-    expect(buildTelegramUserQrUrl('alice')).toBe('https://web.teagram.io/#~QQHDpNc');
+  it('encodes a username QR as the canonical v1 profile link', async() => {
+    await expect(buildTelegramUserQrUrl('alice')).resolves.toBe('https://web.teagram.io/#~QQHDpNc');
   });
 });

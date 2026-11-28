@@ -43,11 +43,13 @@ import {
 import type {PrivateUsernameRegistrationMode} from '@/pages/privateUsernameAuth';
 import {markPrivateUsernameLogin} from '@/pages/privateUsernameLoginState';
 import {
-  restorePrivateUsernameV1InviteSecretForRetry,
   storePrivateUsernameInviteSecretForAccountSwitch,
-  takePrivateUsernameInviteSecretFromFragment,
-  takePrivateUsernameV1InviteSecretFromFragment
+  takePrivateUsernameInviteSecretFromFragment
 } from '@/pages/privateUsernameInvite';
+import {
+  restorePrivateUsernameV1InviteSecretForRetry,
+  takePrivateUsernameV1InviteSecretFromFragment
+} from '@/pages/privateUsernameInviteV1';
 import styles from '@/pages/authFlow.module.scss';
 
 if(import.meta.hot) import.meta.hot.accept();

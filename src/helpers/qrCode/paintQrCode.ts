@@ -1,5 +1,5 @@
 import pause from '@helpers/schedulers/pause';
-import {createFragmentLinkURL} from '@lib/fragmentLink';
+import {buildFragmentLinkURL} from '@helpers/fragmentLinkURL';
 import textToSvgURL from '@helpers/textToSvgURL';
 
 /**
@@ -115,5 +115,5 @@ export async function paintQrCode(options: PaintQrOptions) {
  * place for the link shape.
  */
 export function buildTelegramUserQrUrl(username: string) {
-  return createFragmentLinkURL({type: 1, username});
+  return buildFragmentLinkURL({type: 1, username});
 }

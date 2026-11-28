@@ -26,7 +26,7 @@ import PopupReactedList from '@components/popups/reactedList';
 import {ChatReactionsMenu, REACTION_CONTAINER_SIZE} from '@components/chat/reactionsMenu';
 import getPeerId from '@appManagers/utils/peers/getPeerId';
 import getServerMessageId from '@appManagers/utils/messageId/getServerMessageId';
-import {createFragmentLinkURL} from '@lib/fragmentLink';
+import {buildFragmentLinkURL} from '@helpers/fragmentLinkURL';
 import {AppManagers} from '@lib/managers';
 import positionMenu, {MenuPositionPadding, positionFloatingMenu} from '@helpers/positionMenu';
 import {getAppWindow, getOverlayRoot} from '@helpers/appWindow';
@@ -1911,9 +1911,9 @@ export default class ChatContextMenu {
       const messageId = isDiscussionFromChannel ?
         getServerMessageId(threadMessage.fwd_from.channel_post) :
         getServerMessageId(mid);
-      url = createFragmentLinkURL({type: 2, username, messageId: BigInt(messageId)});
+      url = await buildFragmentLinkURL({type: 2, username, messageId: BigInt(messageId)});
     } else {
-      url = createFragmentLinkURL({
+      url = await buildFragmentLinkURL({
         type: 3,
         channelId: BigInt(peerId.toChatId()),
         messageId: BigInt(getServerMessageId(mid))

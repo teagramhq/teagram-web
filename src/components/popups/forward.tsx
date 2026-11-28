@@ -6,7 +6,7 @@ import {toastNew} from '@components/toast';
 import showPickUserPopup from '@components/popups/pickUser';
 import getMediaFromMessage from '@appManagers/utils/messages/getMediaFromMessage';
 import getServerMessageId from '@appManagers/utils/messageId/getServerMessageId';
-import {createFragmentLinkURL} from '@lib/fragmentLink';
+import {buildFragmentLinkURL} from '@helpers/fragmentLinkURL';
 import {copyTextToClipboard} from '@helpers/clipboard';
 import {i18n, join} from '@lib/langPack';
 import {useAppConfig, useIsFrozen} from '@stores/appState';
@@ -173,8 +173,8 @@ export default async function showForwardPopup(
     const username = await rootScope.managers.appPeersManager.getPeerUsername(fromPeerId);
     const msgId = getServerMessageId(mid);
     const url = username ?
-      createFragmentLinkURL({type: 2, username, messageId: BigInt(msgId)}) :
-      createFragmentLinkURL({type: 3, channelId: BigInt(fromPeerId.toChatId()), messageId: BigInt(msgId)});
+      await buildFragmentLinkURL({type: 2, username, messageId: BigInt(msgId)}) :
+      await buildFragmentLinkURL({type: 3, channelId: BigInt(fromPeerId.toChatId()), messageId: BigInt(msgId)});
 
     copyTextToClipboard(url);
     toastNew({langPackKey: 'LinkCopied'});
