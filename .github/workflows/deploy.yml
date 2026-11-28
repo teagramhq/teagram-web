@@ -2,6 +2,11 @@ name: Deploy.
 
 run-name: ${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || '' }}
 
+# Keep both origins on one audited image pin across concurrent publications.
+concurrency:
+  group: deploy-teagram-web
+  cancel-in-progress: false
+
 # Deploy only image pins published from successful master commits. The image
 # pin identifies both the web source commit and the audited private artifact.
 on:
@@ -36,6 +41,7 @@ jobs:
       run_id: ${{ steps.target.outputs.run_id }}
       artifact_name: ${{ steps.target.outputs.artifact_name }}
       image_digest: ${{ steps.target.outputs.image_digest }}
+      origin: ${{ steps.target.outputs.origin }}
 
     steps:
       - name: Resolve the published web image pin
@@ -44,7 +50,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ github.event.workflow_run.id }}
           RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          WEB_ORIGIN: ${{ vars.WEB_ORIGIN }}
         run: |
+          origin="${WEB_ORIGIN:-k3s}"
+          [[ "$origin" == k3s || "$origin" == pages ]] || {
+            echo '::error::WEB_ORIGIN must be k3s or pages'
+            exit 1
+          }
+
           pin_prefix='teagram-web-image-pin-'
 
           artifact_for_run() {
@@ -183,6 +196,7 @@ jobs:
             printf 'run_id=%s\n' "$run_id"
             printf 'artifact_name=%s\n' "$artifact_name"
             printf 'image_digest=%s\n' "$image_digest"
+            printf 'origin=%s\n' "$origin"
           } > "$GITHUB_OUTPUT"
 
   deploy-web:
@@ -191,13 +205,15 @@ jobs:
     if: ${{ needs.check-published-image-pin.outputs.skip == 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    concurrency:
-      group: deploy-teagram-web
-      cancel-in-progress: false
     environment: k3s-prod
     permissions:
       contents: read
       actions: read
+    outputs:
+      sha: ${{ steps.refresh.outputs.sha }}
+      run_id: ${{ steps.refresh.outputs.run_id }}
+      artifact_name: ${{ steps.refresh.outputs.artifact_name }}
+      image_digest: ${{ steps.refresh.outputs.image_digest }}
 
     steps:
       - name: Refresh the published web image after acquiring deployment slot
@@ -437,18 +453,225 @@ jobs:
             exit 1
           fi
 
-      - name: Deploy, verify the public route, and roll back on failure
+      - name: Deploy, verify the selected route, and roll back on failure
         env:
           DEPLOY_SHA: ${{ steps.refresh.outputs.sha }}
           ARTIFACT_DIGEST: ${{ steps.pin.outputs.artifact_digest }}
           DEPLOY_IMAGE: ghcr.io/teagramhq/teagram-web@sha256:${{ steps.refresh.outputs.image_digest }}
           REQUIRE_SINGLE_CLOUDFLARED: 'true'
-          SMOKE_URL: https://web.teagram.io/
+          WEB_ORIGIN: ${{ needs.check-published-image-pin.outputs.origin }}
         run: |
+          set -euo pipefail
+          if [[ "$WEB_ORIGIN" == pages ]]; then
+            smoke_url='http://127.0.0.1:18080/'
+            verify_route=fallback
+            verify_label=fallback
+          else
+            smoke_url='https://web.teagram.io/'
+            verify_route=public
+            verify_label=rollout
+          fi
+
+          VERIFY_ROUTE="$verify_route" VERIFY_LABEL="$verify_label" \
           bash .github/scripts/deploy-k8s-web.sh \
             "$RUNNER_TEMP/teagram-web-prod.yaml" \
-            "$DEPLOY_SHA" "$ARTIFACT_DIGEST" "$DEPLOY_IMAGE" "$SMOKE_URL"
+            "$DEPLOY_SHA" "$ARTIFACT_DIGEST" "$DEPLOY_IMAGE" "$smoke_url"
 
       - name: Remove the deploy kubeconfig
         if: ${{ always() }}
         run: rm -f "$RUNNER_TEMP/k8s/config"
+
+  deploy-pages:
+    name: 'deploy: web (pages)'
+    needs:
+      - check-published-image-pin
+      - deploy-web
+    if: ${{ needs.check-published-image-pin.outputs.skip == 'false' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      contents: read
+      actions: read
+      pages: write
+      id-token: write
+
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.18.0
+
+      - name: Check out the selected published source commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.deploy-web.outputs.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download the selected web image pin
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.deploy-web.outputs.artifact_name }}
+          path: ${{ runner.temp }}/web-image-pin
+          run-id: ${{ needs.deploy-web.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify the selected source commit and image pin
+        id: pin
+        env:
+          DEPLOY_SHA: ${{ needs.deploy-web.outputs.sha }}
+          IMAGE_DIGEST: ${{ needs.deploy-web.outputs.image_digest }}
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          [[ "$actual_sha" == "$DEPLOY_SHA" ]] || {
+            echo '::error::checked out source does not match the selected published commit'
+            exit 1
+          }
+          pin="$RUNNER_TEMP/web-image-pin/teagram-web-image-pin.json"
+          [[ -f "$pin" && ! -L "$pin" ]] || {
+            echo '::error::downloaded image pin must be a regular, non-symlink file'
+            exit 1
+          }
+          jq -e --arg sha "$DEPLOY_SHA" \
+            --arg image "ghcr.io/teagramhq/teagram-web@sha256:$IMAGE_DIGEST" \
+            '.sourceCommit == $sha and .image == $image and (.artifactDigest | test("^sha256:[0-9a-f]{64}$"))' \
+            "$pin" >/dev/null || {
+              echo '::error::image pin metadata does not match the selected source and digest'
+              exit 1
+            }
+          printf 'artifact_digest=%s\n' "$(jq -r '.artifactDigest' "$pin")" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Pages settings and deployment policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WEB_ORIGIN: ${{ needs.check-published-image-pin.outputs.origin }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == refs/heads/master ]] || {
+            echo '::error::Pages publishing is allowed only from master'
+            exit 1
+          }
+          [[ "$WEB_ORIGIN" == k3s || "$WEB_ORIGIN" == pages ]] || {
+            echo '::error::WEB_ORIGIN must be k3s or pages'
+            exit 1
+          }
+
+          pages_config="$RUNNER_TEMP/pages-config.json"
+          gh api "repos/$GITHUB_REPOSITORY/pages" > "$pages_config"
+          jq -e '.build_type == "workflow" and .cname == "web.teagram.io"' \
+            "$pages_config" >/dev/null || {
+              echo '::error::Pages must use Actions publishing with the configured web.teagram.io custom domain'
+              exit 1
+            }
+
+          environment="$RUNNER_TEMP/pages-environment.json"
+          gh api "repos/$GITHUB_REPOSITORY/environments/github-pages" > "$environment"
+          jq -e '
+            .deployment_branch_policy.custom_branch_policies == true and
+            .deployment_branch_policy.protected_branches == false
+          ' "$environment" >/dev/null || {
+            echo '::error::the github-pages environment must restrict deployment to the master branch'
+            exit 1
+          }
+          policies="$RUNNER_TEMP/pages-branch-policies.json"
+          gh api "repos/$GITHUB_REPOSITORY/environments/github-pages/deployment-branch-policies" > "$policies"
+          jq -e '
+            (.branch_policies | length) == 1 and
+            .branch_policies[0].name == "master" and
+            .branch_policies[0].type == "branch"
+          ' "$policies" >/dev/null || {
+            echo '::error::the github-pages environment must allow only the master branch'
+            exit 1
+          }
+
+      - name: Pull and extract the pinned image web root
+        env:
+          DEPLOY_SHA: ${{ needs.deploy-web.outputs.sha }}
+          IMAGE_DIGEST: ${{ needs.deploy-web.outputs.image_digest }}
+          ARTIFACT_DIGEST: ${{ steps.pin.outputs.artifact_digest }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/teagramhq/teagram-web@sha256:$IMAGE_DIGEST"
+          docker pull --platform linux/amd64 "$image"
+          labels="$(docker image inspect "$image" --format '{{ json .Config.Labels }}')"
+          jq -e --arg sha "$DEPLOY_SHA" --arg digest "$ARTIFACT_DIGEST" \
+            '."org.opencontainers.image.revision" == $sha and ."com.teagram.private-artifact.digest" == $digest' \
+            <<<"$labels" >/dev/null || {
+              echo '::error::pinned image labels do not match the selected audited source'
+              exit 1
+            }
+          container_id="$(docker create --platform linux/amd64 "$image")"
+          trap 'docker rm "$container_id" >/dev/null' EXIT
+          mkdir -p "$RUNNER_TEMP/pages-image-html"
+          docker cp "$container_id:/usr/share/nginx/html/." "$RUNNER_TEMP/pages-image-html/"
+
+      - name: Verify the pinned web root against the audited artifact
+        env:
+          DEPLOY_SHA: ${{ needs.deploy-web.outputs.sha }}
+          ARTIFACT_DIGEST: ${{ steps.pin.outputs.artifact_digest }}
+        run: |
+          set -euo pipefail
+          verification_log="$RUNNER_TEMP/audited-artifact-verification.log"
+          if ! node scripts/verify-deployment-artifact.mjs \
+            --dist "$RUNNER_TEMP/pages-image-html" --commit "$DEPLOY_SHA" \
+            > "$verification_log" 2>&1; then
+            echo '::error::the pinned image web root failed audited artifact verification'
+            exit 1
+          fi
+          actual_digest="$(jq -er '.artifactDigest' "$RUNNER_TEMP/pages-image-html/mtproto-target.json")"
+          [[ "$actual_digest" == "$ARTIFACT_DIGEST" ]] || {
+            echo '::error::the pinned image web root does not match the image pin artifact digest'
+            exit 1
+          }
+          printf 'audited_image=verified source_commit=%s artifact_digest=%s\n' \
+            "$DEPLOY_SHA" "$actual_digest"
+
+      - name: Prepare the Pages site from the pinned image
+        env:
+          DEPLOY_SHA: ${{ needs.deploy-web.outputs.sha }}
+        run: |
+          node .github/scripts/prepare-pages-site.mjs prepare \
+            --source "$RUNNER_TEMP/pages-image-html" \
+            --output "$RUNNER_TEMP/pages-site" \
+            --commit "$DEPLOY_SHA"
+
+      - name: Upload the Pages site
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        with:
+          path: ${{ runner.temp }}/pages-site
+
+      - name: Verify hidden resources in the Pages archive
+        run: |
+          set -euo pipefail
+          expected="$RUNNER_TEMP/pages-well-known-paths.txt"
+          archived="$RUNNER_TEMP/pages-archive-paths.txt"
+          find "$RUNNER_TEMP/pages-site/.well-known" -type f -printf './.well-known/%P\n' | sort > "$expected"
+          tar -tf "$RUNNER_TEMP/artifact.tar" | sort > "$archived"
+          missing="$(comm -23 "$expected" "$archived")"
+          [[ -z "$missing" ]] || {
+            echo '::error::the Pages archive omitted one or more .well-known resources'
+            exit 1
+          }
+          grep --fixed-strings --line-regexp --quiet './.well-known/teagram-web/version.txt' "$archived" || {
+            echo '::error::the Pages archive omitted the existing hidden version resource'
+            exit 1
+          }
+          printf 'pages_archive_well_known=verified files=%s\n' "$(wc -l < "$expected" | tr -d ' ')"
+
+      - name: Deploy the Pages site
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
+
+      - name: Verify the selected public origin
+        env:
+          WEB_ORIGIN: ${{ needs.check-published-image-pin.outputs.origin }}
+          DEPLOY_SHA: ${{ needs.deploy-web.outputs.sha }}
+        run: |
+          node .github/scripts/verify-pages-origin.mjs verify \
+            --origin "$WEB_ORIGIN" \
+            --commit "$DEPLOY_SHA" \
+            --timeout-seconds 600

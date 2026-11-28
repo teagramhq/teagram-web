@@ -33,21 +33,18 @@ refreshes that selection after taking the serialized deployment slot, and
 checks its source commit and private-artifact digest before rendering the
 production overlay. Only the published source commit is checked out.
 
-The production job validates the CA-pinned `K3S_WEB_KUBECONFIG` secret from the
-`k3s-prod` GitHub environment, restricted to deployment branch `master`, and
-joins the tailnet as `tag:k3s-deploy` using `K3S_TS_OAUTH_CLIENT_ID` and
-`K3S_TS_OAUTH_SECRET`. It requires a successful tailnet ping of
-`teagram.tailaa4918.ts.net` and confirms that exactly one k3s Cloudflare
-connector pod is ready. It runs
-`kubectl apply --dry-run=server`, applies the
-rendered overlay, waits for the Deployment, then checks the public web route's
-root, JavaScript bundle, and `mtproto-target.json` source identity. If apply,
-rollout, or smoke verification fails after changes begin, it runs
-`kubectl rollout undo deployment/teagram-web --namespace teagram --to-revision="$PREVIOUS_REVISION"`,
-waits for that rollout, and verifies the previous image is restored. If the rollout
-fails, it first records the web pods' status, termination metadata, and recent
-events without printing pod environment values. A successful run logs
-`rollout=verified sha=<source-commit>`.
+The k3s job keeps its existing identity checks, server-side dry run, rollout,
+and rollback. With `WEB_ORIGIN` unset or set to `k3s`, it verifies the public
+route and logs `rollout=verified sha=<source-commit>`. With `WEB_ORIGIN=pages`,
+it keeps the fallback current, checks it through its own local route, and logs
+`fallback=verified sha=<source-commit>`.
+
+The Pages job uses the same selected image pin. It verifies the Pages
+configuration and deployment branch policy, publishes the pinned image's web
+root with the required static routes, and confirms the selected source commit
+is served. It logs `pages=verified sha=<source-commit>` in `k3s` mode or
+`rollout=verified sha=<source-commit>` in `pages` mode, so each successful run
+contains exactly one `rollout=verified` line.
 
 The `test: k8s-deploy` job runs the same deployment script in a throwaway k3s
 cluster. It first deploys and smokes the reviewed image, then substitutes an

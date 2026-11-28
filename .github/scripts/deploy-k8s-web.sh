@@ -12,6 +12,8 @@ deploy_sha=$2
 artifact_digest=$3
 deploy_image=$4
 smoke_url=$5
+verification_route=${VERIFY_ROUTE:-public}
+verification_label=${VERIFY_LABEL:-rollout}
 namespace=teagram
 deployment=teagram-web
 rollout_timeout=${ROLLOUT_TIMEOUT:-180s}
@@ -19,6 +21,18 @@ require_single_cloudflared=${REQUIRE_SINGLE_CLOUDFLARED:-false}
 deployment_started=false
 previous_revision=
 previous_image=
+port_forward_pid=
+port_forward_log=
+
+cleanup_port_forward() {
+  if [[ -n "$port_forward_pid" ]]; then
+    kill "$port_forward_pid" 2>/dev/null || true
+    wait "$port_forward_pid" 2>/dev/null || true
+    port_forward_pid=
+  fi
+}
+
+trap cleanup_port_forward EXIT
 
 fail() {
   printf 'web deploy: %s\n' "$1" >&2
@@ -37,6 +51,7 @@ rollback_failure() {
 rollback_on_error() {
   local status="$1"
   trap - ERR INT TERM
+  cleanup_port_forward
 
   if [[ "$deployment_started" == true ]]; then
     printf 'deploy failed; restoring teagram-web revision %s\n' "$previous_revision" >&2
@@ -74,12 +89,25 @@ trap 'rollback_on_error 143' TERM
 [[ "$deploy_image" =~ ^ghcr\.io/teagramhq/teagram-web(:[A-Za-z0-9_.-]+|@sha256:[0-9a-f]{64})$ ]] ||
   fail 'image reference is invalid'
 [[ "$smoke_url" =~ ^https?://[^[:space:]]+$ ]] || fail 'smoke URL is invalid'
+[[ "$verification_route" == public || "$verification_route" == fallback ]] ||
+  fail 'VERIFY_ROUTE must be public or fallback'
+[[ "$verification_label" == rollout || "$verification_label" == fallback ]] ||
+  fail 'VERIFY_LABEL must be rollout or fallback'
+if [[ "$verification_route" == public ]]; then
+  [[ "$verification_label" == rollout ]] || fail 'the public route must use the rollout verification label'
+else
+  [[ "$verification_label" == fallback && "$smoke_url" == 'http://127.0.0.1:18080/' ]] ||
+    fail 'the fallback route must use its local service URL and fallback verification label'
+fi
 [[ "$require_single_cloudflared" == true || "$require_single_cloudflared" == false ]] ||
   fail 'REQUIRE_SINGLE_CLOUDFLARED must be true or false'
 
 for command in kubectl jq node timeout; do
   command -v "$command" >/dev/null 2>&1 || fail "required command is missing: $command"
 done
+if [[ "$verification_route" == fallback ]]; then
+  command -v curl >/dev/null 2>&1 || fail 'required command is missing: curl'
+fi
 
 grep --fixed-strings --quiet -- "$deploy_image" "$manifest" ||
   fail 'manifest does not contain the reviewed image pin'
@@ -149,7 +177,28 @@ deployed_image=$(kubectl get "deployment/$deployment" --namespace "$namespace" -
   jq -er '[.spec.template.spec.containers[] | select(.name == "teagram-web") | .image] |
     if length == 1 then .[0] else error("expected one teagram-web container") end')
 [[ "$deployed_image" == "$deploy_image" ]] || fail 'the deployment image does not match the reviewed pin'
+
+if [[ "$verification_route" == fallback ]]; then
+  port_forward_log="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/teagram-web-fallback-port-forward-$$.log"
+  kubectl port-forward --address 127.0.0.1 --namespace "$namespace" \
+    "service/$deployment" 18080:80 > "$port_forward_log" 2>&1 &
+  port_forward_pid=$!
+  fallback_ready=false
+  for attempt in {1..30}; do
+    if ! kill -0 "$port_forward_pid" 2>/dev/null; then
+      break
+    fi
+    if health=$(curl -q --noproxy '*' --fail --silent --max-time 2 \
+      "${smoke_url%/}/healthz?deploy=$deploy_sha") && [[ "$health" == ok ]]; then
+      fallback_ready=true
+      break
+    fi
+    sleep 1
+  done
+  [[ "$fallback_ready" == true ]] || fail 'the fallback route did not become ready'
+fi
+
 node .github/scripts/smoke-k8s-web.mjs "$smoke_url" "$deploy_sha" "$artifact_digest"
 
 trap - ERR INT TERM
-printf 'rollout=verified sha=%s\n' "$deploy_sha"
+printf '%s=verified sha=%s\n' "$verification_label" "$deploy_sha"
