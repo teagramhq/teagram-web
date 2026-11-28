@@ -9,6 +9,7 @@ import (
 
 type safeDiagnosticError struct {
 	detail string
+	cause  error
 }
 
 func (err safeDiagnosticError) Error() string {
@@ -19,8 +20,16 @@ func (err safeDiagnosticError) SafeFailureCause() string {
 	return err.detail
 }
 
+func (err safeDiagnosticError) Unwrap() error {
+	return err.cause
+}
+
 func safeDiagnostic(detail string) error {
 	return safeDiagnosticError{detail: detail}
+}
+
+func safeDiagnosticWrap(detail string, cause error) error {
+	return safeDiagnosticError{detail: detail, cause: cause}
 }
 
 func safeFailureCause(err error) string {

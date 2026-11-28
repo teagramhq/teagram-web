@@ -37,7 +37,7 @@ type PendingTransition struct {
 }
 
 type StateStore interface {
-	Load(context.Context) (PersistentState, error)
+	Load(context.Context) (state PersistentState, recreated bool, err error)
 	Save(context.Context, PersistentState) error
 }
 
@@ -165,18 +165,18 @@ func (store *KubernetesStateStore) PublishWarning(ctx context.Context, key, mess
 	return nil
 }
 
-func (store *KubernetesStateStore) Load(ctx context.Context) (PersistentState, error) {
+func (store *KubernetesStateStore) Load(ctx context.Context) (PersistentState, bool, error) {
 	for attempt := 0; attempt < 3; attempt++ {
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, store.endpoint+statePath(), nil)
 		if err != nil {
-			return PersistentState{}, fmt.Errorf("could not construct state request")
+			return PersistentState{}, false, fmt.Errorf("could not construct state request")
 		}
 		if err := store.authorize(request); err != nil {
-			return PersistentState{}, err
+			return PersistentState{}, false, err
 		}
 		response, err := store.client.Do(request)
 		if err != nil {
-			return PersistentState{}, fmt.Errorf("Kubernetes state request failed: %w", err)
+			return PersistentState{}, false, fmt.Errorf("Kubernetes state request failed: %w", err)
 		}
 		if response.StatusCode == http.StatusNotFound {
 			response.Body.Close()
@@ -185,17 +185,19 @@ func (store *KubernetesStateStore) Load(ctx context.Context) (PersistentState, e
 				continue
 			}
 			if err != nil {
-				return PersistentState{}, err
+				return PersistentState{}, false, err
 			}
-			return store.decodeStateConfigMap(created)
+			state, err := store.decodeStateConfigMap(created)
+			return state, true, err
 		}
 		if response.StatusCode < 200 || response.StatusCode > 299 {
 			response.Body.Close()
-			return PersistentState{}, fmt.Errorf("Kubernetes state request returned HTTP status %d", response.StatusCode)
+			return PersistentState{}, false, fmt.Errorf("Kubernetes state request returned HTTP status %d", response.StatusCode)
 		}
-		return store.decodeStateConfigMap(response)
+		state, err := store.decodeStateConfigMap(response)
+		return state, false, err
 	}
-	return PersistentState{}, fmt.Errorf("state ConfigMap creation conflicted repeatedly")
+	return PersistentState{}, false, fmt.Errorf("state ConfigMap creation conflicted repeatedly")
 }
 
 func (store *KubernetesStateStore) createStateConfigMap(ctx context.Context) (*http.Response, error) {
@@ -274,11 +276,17 @@ func (store *KubernetesStateStore) decodeStateConfigMap(response *http.Response)
 func (store *KubernetesStateStore) authorize(request *http.Request) error {
 	token, err := os.ReadFile(store.tokenPath)
 	if err != nil {
-		return fmt.Errorf("Kubernetes service account token is unavailable")
+		if errors.Is(err, os.ErrNotExist) {
+			return safeDiagnosticWrap("token_file_missing", err)
+		}
+		if errors.Is(err, os.ErrPermission) {
+			return safeDiagnosticWrap("token_file_permission_denied", err)
+		}
+		return safeDiagnosticWrap("token_file_read_failed", err)
 	}
 	tokenValue := strings.TrimSpace(string(token))
 	if tokenValue == "" {
-		return fmt.Errorf("Kubernetes service account token is empty")
+		return safeDiagnostic("token_file_empty")
 	}
 	request.Header.Set("Authorization", "Bearer "+tokenValue)
 	return nil

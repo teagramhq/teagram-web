@@ -565,15 +565,15 @@ func (sink *recordingAlertSink) count(key string) int {
 	return count
 }
 
-func (store *memoryStateStore) Load(context.Context) (PersistentState, error) {
+func (store *memoryStateStore) Load(context.Context) (PersistentState, bool, error) {
 	if len(store.loadErrors) != 0 {
 		err := store.loadErrors[0]
 		store.loadErrors = store.loadErrors[1:]
 		if err != nil {
-			return PersistentState{}, err
+			return PersistentState{}, false, err
 		}
 	}
-	return store.state, nil
+	return store.state, false, nil
 }
 
 func (store *memoryStateStore) Save(_ context.Context, state PersistentState) error {

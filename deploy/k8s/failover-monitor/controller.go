@@ -93,7 +93,13 @@ func (controller *Controller) validateRecordState(ctx context.Context) bool {
 		return false
 	}
 
-	state, err := controller.stateStore.Load(ctx)
+	state, recreated, err := controller.stateStore.Load(ctx)
+	if recreated {
+		controller.alertEvery(
+			"state_configmap_recreated",
+			"persistent state ConfigMap was missing and recreated; recent DNS change history or a pending transition may have been lost",
+		)
+	}
 	if err != nil {
 		controller.recordSafe = false
 		controller.alert("state_read_failed", messageWithSafeCause("persistent switch state could not be read; record writes are disabled", err))
@@ -342,6 +348,14 @@ func (controller *Controller) alert(key, message string) {
 		return
 	}
 	controller.alerts[key] = true
+	controller.emitAlert(key, message)
+}
+
+func (controller *Controller) alertEvery(key, message string) {
+	controller.emitAlert(key, message)
+}
+
+func (controller *Controller) emitAlert(key, message string) {
 	controller.logger.Printf("level=alert event=%s message=%q", key, message)
 	if controller.alertSink != nil {
 		if err := controller.alertSink.PublishWarning(context.Background(), key, message); err != nil {
