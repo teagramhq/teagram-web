@@ -705,11 +705,17 @@ jobs:
           check_failover_access system:serviceaccount:web-failover:web-failover-monitor get secrets/web-failover-token yes
           check_failover_access system:serviceaccount:web-failover:web-failover-monitor get secrets no
           check_failover_access system:serviceaccount:web-failover:web-failover-monitor get secrets/other-secret no
+          check_failover_access system:serviceaccount:web-failover:web-failover-monitor get configmaps/web-failover-state yes
+          check_failover_access system:serviceaccount:web-failover:web-failover-monitor get configmaps/other-config no
+          check_failover_access system:serviceaccount:web-failover:web-failover-monitor create configmaps yes
           check_failover_access system:serviceaccount:web-failover:default get secrets/web-failover-token no
+          check_failover_access system:serviceaccount:web-failover:default create configmaps no
           check_failover_access system:serviceaccount:web-failover:other-workload get secrets/web-failover-token no
+          check_failover_access system:serviceaccount:web-failover:other-workload create configmaps no
           check_failover_access system:serviceaccount:teagram:teagram-web-deployer get secrets/web-failover-token no
           check_failover_access system:serviceaccount:teagram:teagram-web-deployer get secrets no
           check_failover_access system:serviceaccount:teagram:teagram-web-deployer create pods no
+          check_failover_access system:serviceaccount:teagram:teagram-web-deployer create configmaps no
 
           kubectl kustomize deploy/k8s/overlays/ci > "$RUNNER_TEMP/teagram-web-ci.yaml"
           kubectl apply --dry-run=server --filename "$RUNNER_TEMP/teagram-web-ci.yaml"
@@ -721,6 +727,16 @@ jobs:
             --timeout=60s
           kubectl kustomize deploy/k8s/overlays/failover > "$RUNNER_TEMP/web-failover-ci.yaml"
           kubectl apply --dry-run=server --filename "$RUNNER_TEMP/web-failover-ci.yaml"
+          kubectl apply --filename "$RUNNER_TEMP/web-failover-ci.yaml"
+          kubectl create configmap web-failover-state --namespace web-failover \
+            --from-literal=state.json='{"target":"tunnel.example.test","changes":["2026-11-28T00:00:00Z"]}'
+          kubectl apply --filename "$RUNNER_TEMP/web-failover-ci.yaml"
+          preserved_state="$(kubectl get configmap web-failover-state --namespace web-failover \
+            --output=jsonpath='{.data.state\.json}')"
+          [[ "$preserved_state" == '{"target":"tunnel.example.test","changes":["2026-11-28T00:00:00Z"]}' ]] || {
+            echo '::error::reapplying the failover overlay changed runtime state'
+            exit 1
+          }
 
       - name: Smoke test deployment and forced rollback on the throwaway cluster
         env:

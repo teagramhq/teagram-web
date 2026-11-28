@@ -27,6 +27,9 @@ rules:
     resourceNames: ["web-failover-state"]
     verbs: ["get", "patch"]
   - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+  - apiGroups: [""]
     resources: ["events"]
     verbs: ["create"]
 ---

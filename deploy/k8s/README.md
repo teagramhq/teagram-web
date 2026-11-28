@@ -70,8 +70,11 @@ The token is mounted at `/run/credentials/cloudflare/token` and never enters an
 environment variable. Without the token, the monitor still runs in dry-run mode
 and logs its decisions, but cannot validate the DNS record. Enabling writes
 without the token fails closed. Its Role grants `get` for only that named
-Secret, plus access to its one state ConfigMap and permission to create warning
-Events.
+Secret, `get` and `patch` for only its state ConfigMap, permission to create
+ConfigMaps in the isolated namespace, and permission to create warning Events.
+The monitor creates its runtime state ConfigMap on first use. It is excluded
+from the applied overlay so a redeploy preserves the recorded target and hourly
+change history.
 
 The deployment starts with `WRITES_ENABLED=false`. It reads and validates the
 configured DNS record at startup and before every write. `FAILBACK_ENABLED`

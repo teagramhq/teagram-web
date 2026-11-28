@@ -550,6 +550,14 @@ case "$*" in
       exit 1
     fi
     ;;
+  'auth can-i get secrets/web-failover-token -n web-failover')
+    [[ "${TEST_FAILOVER_TOKEN_FAIL:-false}" != true ]] || exit 1
+    failover_token_access="${TEST_FAILOVER_TOKEN_ACCESS:-no}"
+    printf '%s\n' "$failover_token_access"
+    if [[ "$failover_token_access" == no ]]; then
+      exit 1
+    fi
+    ;;
   'auth can-i create pods -n teagram')
     [[ "${TEST_PODS_FAIL:-false}" != true ]] || exit 1
     pod_access="${TEST_POD_ACCESS:-no}"
@@ -591,13 +599,15 @@ SH
   }
 
   if ! run_identity_guard "$tmp/success.log" TEST_IDENTITY="$expected_identity" \
-    TEST_SECRET_ACCESS=no TEST_FAILOVER_SECRET_ACCESS=no TEST_POD_ACCESS=no TEST_FAILOVER_POD_ACCESS=no; then
+    TEST_SECRET_ACCESS=no TEST_FAILOVER_SECRET_ACCESS=no TEST_FAILOVER_TOKEN_ACCESS=no \
+    TEST_POD_ACCESS=no TEST_FAILOVER_POD_ACCESS=no; then
     fail 'the deploy identity guard must deny secret and pod access in both namespaces'
   fi
   cat >"$tmp/expected-calls" <<'EOF'
 auth whoami -o jsonpath={.status.userInfo.username}
 auth can-i get secrets -n teagram
 auth can-i get secrets -n web-failover
+auth can-i get secrets/web-failover-token -n web-failover
 auth can-i create pods -n teagram
 auth can-i create pods -n web-failover
 EOF
@@ -639,6 +649,18 @@ EOF
   fi
   grep -Fq '::error::kubectl auth can-i get secrets -n web-failover failed' "$tmp/failover-secrets-command-error.log" ||
     fail 'a failover namespace secret authorization error must name the failed check'
+
+  if run_identity_guard "$tmp/failover-token-failure.log" TEST_FAILOVER_TOKEN_ACCESS=yes; then
+    fail 'the deploy identity guard accepted access to the failover token Secret'
+  fi
+  grep -Fq '::error::kubectl auth can-i get secrets/web-failover-token -n web-failover failed' "$tmp/failover-token-failure.log" ||
+    fail 'unexpected failover token Secret access must name the failed check'
+
+  if run_identity_guard "$tmp/failover-token-command-error.log" TEST_FAILOVER_TOKEN_FAIL=true; then
+    fail 'the deploy identity guard accepted a failover token authorization error'
+  fi
+  grep -Fq '::error::kubectl auth can-i get secrets/web-failover-token -n web-failover failed' "$tmp/failover-token-command-error.log" ||
+    fail 'a failover token authorization error must name the failed check'
 
   if run_identity_guard "$tmp/pods-failure.log" TEST_POD_ACCESS=yes; then
     fail 'the deploy identity guard accepted pod creation access'
@@ -800,6 +822,7 @@ check_contract() {
     "$identity_guard_run" == *'system:serviceaccount:teagram:teagram-web-deployer'* &&
     "$identity_guard_run" == *'kubectl auth can-i get secrets -n teagram'* &&
     "$identity_guard_run" == *'kubectl auth can-i get secrets -n web-failover'* &&
+    "$identity_guard_run" == *'kubectl auth can-i get secrets/web-failover-token -n web-failover'* &&
     "$identity_guard_run" == *'kubectl auth can-i create pods -n teagram'* &&
     "$identity_guard_run" == *'kubectl auth can-i create pods -n web-failover'* ]] ||
     fail 'production must run the complete deploy identity and permission guard from the workflow revision'

@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -16,11 +17,23 @@ import (
 	"time"
 )
 
-const stateDataKey = "state.json"
+const (
+	stateDataKey            = "state.json"
+	serviceAccountTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+)
+
+var errStateConfigMapAlreadyExists = errors.New("state ConfigMap already exists")
 
 type PersistentState struct {
-	Target  string      `json:"target"`
-	Changes []time.Time `json:"changes"`
+	Target  string             `json:"target"`
+	Changes []time.Time        `json:"changes"`
+	Pending *PendingTransition `json:"pending,omitempty"`
+}
+
+type PendingTransition struct {
+	From string    `json:"from"`
+	To   string    `json:"to"`
+	At   time.Time `json:"at"`
 }
 
 type StateStore interface {
@@ -30,7 +43,7 @@ type StateStore interface {
 
 type KubernetesStateStore struct {
 	endpoint        string
-	serviceAccount  string
+	tokenPath       string
 	podName         string
 	podUID          string
 	resourceVersion string
@@ -46,10 +59,6 @@ func NewKubernetesStateStore() (*KubernetesStateStore, error) {
 	if port == "" {
 		port = "443"
 	}
-	token, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
-	if err != nil || strings.TrimSpace(string(token)) == "" {
-		return nil, fmt.Errorf("Kubernetes service account token is unavailable")
-	}
 	ca, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
 	if err != nil {
 		return nil, fmt.Errorf("Kubernetes service account CA is unavailable")
@@ -60,10 +69,10 @@ func NewKubernetesStateStore() (*KubernetesStateStore, error) {
 	}
 	dialer := &net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second}
 	return &KubernetesStateStore{
-		endpoint:       "https://" + net.JoinHostPort(host, port),
-		serviceAccount: string(token),
-		podName:        strings.TrimSpace(os.Getenv("POD_NAME")),
-		podUID:         strings.TrimSpace(os.Getenv("POD_UID")),
+		endpoint:  "https://" + net.JoinHostPort(host, port),
+		tokenPath: serviceAccountTokenPath,
+		podName:   strings.TrimSpace(os.Getenv("POD_NAME")),
+		podUID:    strings.TrimSpace(os.Getenv("POD_UID")),
 		client: &http.Client{
 			Timeout: 8 * time.Second,
 			Transport: &http.Transport{
@@ -141,11 +150,13 @@ func (store *KubernetesStateStore) PublishWarning(ctx context.Context, key, mess
 	if err != nil {
 		return fmt.Errorf("could not construct Kubernetes warning event")
 	}
-	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(store.serviceAccount))
+	if err := store.authorize(request); err != nil {
+		return err
+	}
 	request.Header.Set("Content-Type", "application/json")
 	response, err := store.client.Do(request)
 	if err != nil {
-		return fmt.Errorf("Kubernetes warning event request failed")
+		return fmt.Errorf("Kubernetes warning event request failed: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode > 299 {
@@ -155,19 +166,83 @@ func (store *KubernetesStateStore) PublishWarning(ctx context.Context, key, mess
 }
 
 func (store *KubernetesStateStore) Load(ctx context.Context) (PersistentState, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, store.endpoint+statePath(), nil)
-	if err != nil {
-		return PersistentState{}, fmt.Errorf("could not construct state request")
+	for attempt := 0; attempt < 3; attempt++ {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, store.endpoint+statePath(), nil)
+		if err != nil {
+			return PersistentState{}, fmt.Errorf("could not construct state request")
+		}
+		if err := store.authorize(request); err != nil {
+			return PersistentState{}, err
+		}
+		response, err := store.client.Do(request)
+		if err != nil {
+			return PersistentState{}, fmt.Errorf("Kubernetes state request failed: %w", err)
+		}
+		if response.StatusCode == http.StatusNotFound {
+			response.Body.Close()
+			created, err := store.createStateConfigMap(ctx)
+			if errors.Is(err, errStateConfigMapAlreadyExists) {
+				continue
+			}
+			if err != nil {
+				return PersistentState{}, err
+			}
+			return store.decodeStateConfigMap(created)
+		}
+		if response.StatusCode < 200 || response.StatusCode > 299 {
+			response.Body.Close()
+			return PersistentState{}, fmt.Errorf("Kubernetes state request returned HTTP status %d", response.StatusCode)
+		}
+		return store.decodeStateConfigMap(response)
 	}
-	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(store.serviceAccount))
+	return PersistentState{}, fmt.Errorf("state ConfigMap creation conflicted repeatedly")
+}
+
+func (store *KubernetesStateStore) createStateConfigMap(ctx context.Context) (*http.Response, error) {
+	initialState, err := json.Marshal(PersistentState{Changes: []time.Time{}})
+	if err != nil {
+		return nil, fmt.Errorf("could not encode initial Kubernetes state")
+	}
+	body, err := json.Marshal(struct {
+		APIVersion string            `json:"apiVersion"`
+		Kind       string            `json:"kind"`
+		Metadata   map[string]string `json:"metadata"`
+		Data       map[string]string `json:"data"`
+	}{
+		APIVersion: "v1",
+		Kind:       "ConfigMap",
+		Metadata:   map[string]string{"name": stateConfigMap, "namespace": monitorNamespace},
+		Data:       map[string]string{stateDataKey: string(initialState)},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("could not encode initial Kubernetes state resource")
+	}
+	endpoint := store.endpoint + "/api/v1/namespaces/" + url.PathEscape(monitorNamespace) + "/configmaps"
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, fmt.Errorf("could not construct state creation request")
+	}
+	if err := store.authorize(request); err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "application/json")
 	response, err := store.client.Do(request)
 	if err != nil {
-		return PersistentState{}, fmt.Errorf("Kubernetes state request failed")
+		return nil, fmt.Errorf("Kubernetes state creation request failed: %w", err)
 	}
-	defer response.Body.Close()
+	if response.StatusCode == http.StatusConflict {
+		response.Body.Close()
+		return nil, errStateConfigMapAlreadyExists
+	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		return PersistentState{}, fmt.Errorf("Kubernetes state request returned HTTP status %d", response.StatusCode)
+		response.Body.Close()
+		return nil, fmt.Errorf("Kubernetes state creation returned HTTP status %d", response.StatusCode)
 	}
+	return response, nil
+}
+
+func (store *KubernetesStateStore) decodeStateConfigMap(response *http.Response) (PersistentState, error) {
+	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 64*1024+1))
 	if err != nil || len(body) > 64*1024 {
 		return PersistentState{}, fmt.Errorf("Kubernetes state response could not be read")
@@ -196,6 +271,19 @@ func (store *KubernetesStateStore) Load(ctx context.Context) (PersistentState, e
 	return state, nil
 }
 
+func (store *KubernetesStateStore) authorize(request *http.Request) error {
+	token, err := os.ReadFile(store.tokenPath)
+	if err != nil {
+		return fmt.Errorf("Kubernetes service account token is unavailable")
+	}
+	tokenValue := strings.TrimSpace(string(token))
+	if tokenValue == "" {
+		return fmt.Errorf("Kubernetes service account token is empty")
+	}
+	request.Header.Set("Authorization", "Bearer "+tokenValue)
+	return nil
+}
+
 func (store *KubernetesStateStore) Save(ctx context.Context, state PersistentState) error {
 	if store.resourceVersion == "" {
 		return fmt.Errorf("Kubernetes state must be loaded before it is saved")
@@ -218,11 +306,13 @@ func (store *KubernetesStateStore) Save(ctx context.Context, state PersistentSta
 	if err != nil {
 		return fmt.Errorf("could not construct state update")
 	}
-	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(store.serviceAccount))
+	if err := store.authorize(request); err != nil {
+		return err
+	}
 	request.Header.Set("Content-Type", "application/merge-patch+json")
 	response, err := store.client.Do(request)
 	if err != nil {
-		return fmt.Errorf("Kubernetes state update failed")
+		return fmt.Errorf("Kubernetes state update failed: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode > 299 {

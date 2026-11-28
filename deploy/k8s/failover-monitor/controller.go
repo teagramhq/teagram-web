@@ -69,51 +69,127 @@ func NewController(ctx context.Context, config Config, recordClient RecordClient
 		controller.alert("state_store_missing", "persistent switch state is unavailable; record writes are disabled")
 		return finish()
 	}
+	controller.validateRecordState(ctx)
+	return finish()
+}
 
-	record, err := recordClient.GetRecord(ctx)
+func (controller *Controller) validateRecordState(ctx context.Context) bool {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if controller.recordClient == nil || controller.stateStore == nil {
+		return false
+	}
+
+	record, err := controller.recordClient.GetRecord(ctx)
 	if err != nil {
+		controller.recordSafe = false
 		controller.alert("record_read_failed", messageWithSafeCause("startup record validation failed; record writes are disabled", err))
-		return finish()
+		return false
 	}
-	currentTarget, err := validateRecord(record, config)
+	currentTarget, err := validateRecord(record, controller.config)
 	if err != nil {
+		controller.recordSafe = false
 		controller.alert("record_invalid", "startup record validation refused the configured record")
-		return finish()
+		return false
 	}
-	controller.target = currentTarget
 
-	state, err := stateStore.Load(ctx)
+	state, err := controller.stateStore.Load(ctx)
 	if err != nil {
-		controller.alert("state_read_failed", "persistent switch state could not be read; record writes are disabled")
-		return finish()
+		controller.recordSafe = false
+		controller.alert("state_read_failed", messageWithSafeCause("persistent switch state could not be read; record writes are disabled", err))
+		return false
 	}
-	controller.history = recentChanges(state.Changes, time.Now())
+	now := time.Now()
+	state.Changes = recentChanges(state.Changes, now)
+	if state.Pending != nil {
+		from, fromErr := normalizeTarget(state.Pending.From)
+		to, toErr := normalizeTarget(state.Pending.To)
+		if fromErr != nil || toErr != nil || from == to || from != state.Target || state.Pending.At.IsZero() ||
+			(from != normalizedPagesTarget(controller.config) && from != normalizedTunnelTarget(controller.config)) ||
+			(to != normalizedPagesTarget(controller.config) && to != normalizedTunnelTarget(controller.config)) {
+			controller.recordSafe = false
+			controller.alert("pending_state_invalid", "pending DNS transition state was invalid; record writes are disabled")
+			return false
+		}
+		if currentTarget != from && currentTarget != to {
+			controller.recordSafe = false
+			controller.alert("record_drift", "Cloudflare record changed outside the monitor; record writes are disabled")
+			return false
+		}
+		if currentTarget == to {
+			state.Target = to
+			state.Changes = append(state.Changes, state.Pending.At)
+		}
+		state.Pending = nil
+		if err := controller.stateStore.Save(ctx, state); err != nil {
+			controller.recordSafe = false
+			controller.alert("state_reconcile_failed", messageWithSafeCause("pending DNS transition could not be reconciled; record writes are disabled", err))
+			return false
+		}
+		controller.logger.Printf("level=info event=pending_dns_transition_reconciled target=%s", currentTarget)
+	}
+
 	if state.Target == "" {
 		state.Target = currentTarget
-		state.Changes = controller.history
-		if err := stateStore.Save(ctx, state); err != nil {
-			controller.alert("state_initialize_failed", "persistent switch state could not be initialized; record writes are disabled")
-			return finish()
+		if err := controller.stateStore.Save(ctx, state); err != nil {
+			controller.recordSafe = false
+			controller.alert("state_initialize_failed", messageWithSafeCause("persistent switch state could not be initialized; record writes are disabled", err))
+			return false
 		}
 	} else {
 		storedTarget, normalizeErr := normalizeTarget(state.Target)
 		if normalizeErr != nil || storedTarget != currentTarget {
+			controller.recordSafe = false
 			controller.alert("record_drift", "Cloudflare record changed outside the monitor; record writes are disabled")
-			return finish()
+			return false
 		}
 	}
-	if len(controller.history) >= maxChanges && currentTarget != normalizedTunnelTarget(config) {
+	if len(state.Changes) >= maxChanges && currentTarget != normalizedTunnelTarget(controller.config) {
+		controller.recordSafe = false
 		controller.alert("change_cap_state_invalid", "DNS change cap is exhausted while the current target is not the tunnel")
-		return finish()
+		return false
 	}
+	controller.target = currentTarget
+	controller.history = state.Changes
 	controller.recordSafe = true
-	return finish()
+	controller.updateMetrics(time.Now())
+	if controller.clearValidationAlerts() {
+		controller.logger.Printf("level=info event=record_validation_recovered")
+	}
+	return true
+}
+
+func (controller *Controller) retryRecordValidation(ctx context.Context) {
+	controller.mu.Lock()
+	needsValidation := controller.recordClient != nil && controller.stateStore != nil && !controller.recordSafe
+	controller.mu.Unlock()
+	if needsValidation {
+		controller.validateRecordState(ctx)
+	}
+}
+
+func (controller *Controller) clearValidationAlerts() bool {
+	cleared := false
+	for _, key := range []string{
+		"record_read_failed", "record_invalid", "state_read_failed", "state_initialize_failed",
+		"state_reconcile_failed", "pending_state_invalid", "record_drift", "change_cap_state_invalid",
+		"record_read_before_write_failed", "record_invalid_before_write", "record_drift_before_write",
+		"state_pending_failed", "record_patch_failed", "record_patch_unverified", "state_write_failed",
+		"record_write_blocked",
+	} {
+		if controller.alerts[key] {
+			delete(controller.alerts, key)
+			cleared = true
+		}
+	}
+	return cleared
 }
 
 func (controller *Controller) Run(ctx context.Context, probe Probe) {
 	ticker := time.NewTicker(probeInterval)
 	defer ticker.Stop()
 	for {
+		controller.retryRecordValidation(ctx)
 		probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 		err := probe(probeCtx, controller.config)
 		cancel()
@@ -154,6 +230,7 @@ func (controller *Controller) observe(ctx context.Context, now time.Time, probeE
 }
 
 func (controller *Controller) switchTo(ctx context.Context, target, reason string, now time.Time) {
+	defer controller.updateMetrics(now)
 	target, err := normalizeTarget(target)
 	if err != nil || target == controller.target {
 		return
@@ -189,6 +266,7 @@ func (controller *Controller) switchTo(ctx context.Context, target, reason strin
 
 	currentRecord, err := controller.recordClient.GetRecord(ctx)
 	if err != nil {
+		controller.recordSafe = false
 		controller.alert("record_read_before_write_failed", messageWithSafeCause("record write refused because the current record could not be read", err))
 		return
 	}
@@ -204,8 +282,20 @@ func (controller *Controller) switchTo(ctx context.Context, target, reason strin
 		return
 	}
 
+	pendingState := PersistentState{
+		Target:  controller.target,
+		Changes: controller.history,
+		Pending: &PendingTransition{From: controller.target, To: target, At: now},
+	}
+	if err := controller.stateStore.Save(ctx, pendingState); err != nil {
+		controller.recordSafe = false
+		controller.alert("state_pending_failed", messageWithSafeCause("DNS update was not attempted because its pending transition could not be saved", err))
+		return
+	}
+
 	updatedRecord, err := controller.recordClient.PatchTarget(ctx, target)
 	if err != nil {
+		controller.recordSafe = false
 		controller.alert("record_patch_failed", messageWithSafeCause("Cloudflare refused the DNS record update", err))
 		return
 	}
@@ -219,6 +309,7 @@ func (controller *Controller) switchTo(ctx context.Context, target, reason strin
 	newState := PersistentState{
 		Target:  target,
 		Changes: append(controller.history, now),
+		Pending: nil,
 	}
 	if err := controller.stateStore.Save(ctx, newState); err != nil {
 		controller.recordSafe = false

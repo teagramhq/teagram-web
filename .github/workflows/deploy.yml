@@ -437,6 +437,12 @@ jobs:
             exit 1
           fi
 
+          failover_token_access="$(kubectl auth can-i get secrets/web-failover-token -n web-failover || true)"
+          if [[ "$failover_token_access" != no ]]; then
+            echo '::error::kubectl auth can-i get secrets/web-failover-token -n web-failover failed; expected no'
+            exit 1
+          fi
+
           pod_access="$(kubectl auth can-i create pods -n teagram || true)"
           if [[ "$pod_access" != no ]]; then
             echo '::error::kubectl auth can-i create pods -n teagram failed; expected no'

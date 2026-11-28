@@ -300,6 +300,114 @@ func TestRecordFailureAlertsIncludeOnlySafeCause(t *testing.T) {
 	}
 }
 
+func TestStartupValidationRetriesTransientFailures(t *testing.T) {
+	config := testConfig()
+	config.WritesEnabled = true
+	state := &memoryStateStore{state: PersistentState{Target: config.PagesTarget}}
+	client := &fakeRecordClient{
+		getErrors: []error{fmt.Errorf("temporary Cloudflare error: %w", context.DeadlineExceeded)},
+		records:   []DNSRecord{testRecord(config, config.PagesTarget)},
+	}
+	var logs bytes.Buffer
+	controller, err := NewController(context.Background(), config, client, state, log.New(&logs, "", 0), NewMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !controller.SafetyLocked() {
+		t.Fatal("startup write access must remain locked after a transient record read failure")
+	}
+	controller.retryRecordValidation(context.Background())
+	if controller.SafetyLocked() || controller.CurrentTarget() != config.PagesTarget {
+		t.Fatal("record validation did not recover after the transient Cloudflare error")
+	}
+	if !strings.Contains(logs.String(), "event=record_validation_recovered") {
+		t.Fatalf("recovered validation was not logged: %s", logs.String())
+	}
+
+	state = &memoryStateStore{
+		state:      PersistentState{Target: config.PagesTarget},
+		loadErrors: []error{fmt.Errorf("temporary Kubernetes error: %w", context.DeadlineExceeded)},
+	}
+	client = &fakeRecordClient{records: []DNSRecord{
+		testRecord(config, config.PagesTarget),
+		testRecord(config, config.PagesTarget),
+	}}
+	controller, err = NewController(context.Background(), config, client, state, log.New(&logs, "", 0), NewMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !controller.SafetyLocked() {
+		t.Fatal("startup write access must remain locked after a transient state read failure")
+	}
+	controller.retryRecordValidation(context.Background())
+	if controller.SafetyLocked() || controller.CurrentTarget() != config.PagesTarget {
+		t.Fatal("record validation did not recover after the transient Kubernetes error")
+	}
+}
+
+func TestPendingTransitionReconcilesAfterFinalStateSaveFailure(t *testing.T) {
+	config := testConfig()
+	config.WritesEnabled = true
+	config.InitialTarget = config.TunnelTarget
+	state := &memoryStateStore{
+		state:      PersistentState{Target: config.TunnelTarget},
+		saveErrors: []error{nil, errors.New("simulated final state save failure")},
+	}
+	client := &mutableRecordClient{record: testRecord(config, config.TunnelTarget)}
+	var logs bytes.Buffer
+	controller, err := NewController(context.Background(), config, client, state, log.New(&logs, "", 0), NewMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().Add(-failbackWindow)
+	controller.observe(context.Background(), start, nil)
+	controller.observe(context.Background(), start.Add(failbackWindow), nil)
+	if client.record.Content != config.PagesTarget {
+		t.Fatalf("Cloudflare target after failback = %q, want Pages target", client.record.Content)
+	}
+	if controller.recordSafe {
+		t.Fatal("failed final state save must keep writes locked until reconciliation")
+	}
+	if state.state.Pending == nil || state.state.Pending.To != config.PagesTarget {
+		t.Fatalf("failed final state save lost its pending transition: %#v", state.state)
+	}
+
+	restarted, err := NewController(context.Background(), config, client, state, log.New(&logs, "", 0), NewMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restarted.SafetyLocked() || restarted.CurrentTarget() != config.PagesTarget {
+		t.Fatal("monitor did not reconcile its own DNS transition after restart")
+	}
+	if state.state.Pending != nil || state.state.Target != config.PagesTarget || len(state.state.Changes) != 1 {
+		t.Fatalf("reconciled state did not commit the failback exactly once: %#v", state.state)
+	}
+}
+
+func TestDNSWriteRequiresPendingStateToBeSaved(t *testing.T) {
+	config := testConfig()
+	config.WritesEnabled = true
+	state := &memoryStateStore{
+		state:      PersistentState{Target: config.PagesTarget},
+		saveErrors: []error{errors.New("simulated pending state save failure")},
+	}
+	client := &mutableRecordClient{record: testRecord(config, config.PagesTarget)}
+	controller, err := NewController(context.Background(), config, client, state, log.New(&bytes.Buffer{}, "", 0), NewMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	for attempt := 0; attempt < 3; attempt++ {
+		controller.observe(context.Background(), start.Add(time.Duration(attempt)*probeInterval), errors.New("probe failed"))
+	}
+	if len(client.patched) != 0 || client.record.Content != config.PagesTarget {
+		t.Fatalf("DNS changed without persisted pending state: patches=%v record=%q", client.patched, client.record.Content)
+	}
+	if controller.recordSafe || state.state.Pending != nil {
+		t.Fatal("failed pending-state save must block writes without persisting an incomplete transition")
+	}
+}
+
 func testRecord(config Config, target string) DNSRecord {
 	return DNSRecord{
 		ID:      config.RecordID,
@@ -311,13 +419,21 @@ func testRecord(config Config, target string) DNSRecord {
 }
 
 type fakeRecordClient struct {
-	records  []DNSRecord
-	patched  []string
-	getErr   error
-	patchErr error
+	records   []DNSRecord
+	patched   []string
+	getErr    error
+	getErrors []error
+	patchErr  error
 }
 
 func (client *fakeRecordClient) GetRecord(context.Context) (DNSRecord, error) {
+	if len(client.getErrors) != 0 {
+		err := client.getErrors[0]
+		client.getErrors = client.getErrors[1:]
+		if err != nil {
+			return DNSRecord{}, err
+		}
+	}
 	if client.getErr != nil {
 		return DNSRecord{}, client.getErr
 	}
@@ -338,7 +454,9 @@ func (client *fakeRecordClient) PatchTarget(_ context.Context, target string) (D
 }
 
 type memoryStateStore struct {
-	state PersistentState
+	state      PersistentState
+	loadErrors []error
+	saveErrors []error
 }
 
 type mutableRecordClient struct {
@@ -360,10 +478,24 @@ func (client *mutableRecordClient) PatchTarget(_ context.Context, target string)
 }
 
 func (store *memoryStateStore) Load(context.Context) (PersistentState, error) {
+	if len(store.loadErrors) != 0 {
+		err := store.loadErrors[0]
+		store.loadErrors = store.loadErrors[1:]
+		if err != nil {
+			return PersistentState{}, err
+		}
+	}
 	return store.state, nil
 }
 
 func (store *memoryStateStore) Save(_ context.Context, state PersistentState) error {
+	if len(store.saveErrors) != 0 {
+		err := store.saveErrors[0]
+		store.saveErrors = store.saveErrors[1:]
+		if err != nil {
+			return err
+		}
+	}
 	store.state = state
 	return nil
 }
