@@ -1550,7 +1550,9 @@ test('isolates two server tabs when a custom server worker takes control', async
       await expect(page.locator('#page-chats')).toBeVisible({timeout: 60_000});
       expect(Number(await page.evaluate(() => String((window as any).rootScope.myId)))).toBeGreaterThan(0);
 
-      expect(discoveryRequests).toEqual([`https://${DEFAULT_DISCOVERY_HOST}/.well-known/teagramd/client`]);
+      // Selection and bootstrap each resolve the profile, so more than one fetch is expected; all must hit the server host.
+      expect(discoveryRequests.length).toBeGreaterThan(0);
+      expect(discoveryRequests.every((url) => url === `https://${DEFAULT_DISCOVERY_HOST}/.well-known/teagramd/client`)).toBe(true);
       expect(webSocketRequests).toContain(SERVER_WSS_ENDPOINT);
       expect(webSocketRequests).not.toContain(`wss://${APP_HOST}/apiws`);
       expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_ID__)).toBe('default');
@@ -1574,10 +1576,7 @@ test('isolates two server tabs when a custom server worker takes control', async
       await expect(page.getByRole('dialog')).toHaveCount(0);
       expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_ID__)).toBe('default');
       expect(await getSavedState()).toEqual(savedState);
-      expect(discoveryRequests).toEqual([
-        `https://${DEFAULT_DISCOVERY_HOST}/.well-known/teagramd/client`,
-        `https://${DEFAULT_DISCOVERY_HOST}/.well-known/teagramd/client`
-      ]);
+      expect(discoveryRequests.every((url) => url === `https://${DEFAULT_DISCOVERY_HOST}/.well-known/teagramd/client`)).toBe(true);
       expect(webSocketRequests).not.toContain(`wss://${APP_HOST}/apiws`);
     });
 
