@@ -6,6 +6,7 @@ set -euo pipefail
 
 workflow="${DEPLOY_WORKFLOW:-.github/workflows/deploy.yml}"
 expected_if="\${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}"
+expected_concurrency_group="\${{ ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) && 'deploy-teagram-web' || format('deploy-teagram-web-ineligible-{0}-{1}', github.run_id, github.run_attempt) }}"
 expected_deploy_if="\${{ needs.check-published-image-pin.outputs.skip == 'false' }}"
 expected_run_name="\${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || '' }}"
 expected_issue_description='Issue key to report this run to (e.g. MAIN-123). Leave empty for no report.'
@@ -573,6 +574,27 @@ case "$*" in
       exit 1
     fi
     ;;
+  'auth can-i get services/teagram-web --subresource=proxy -n teagram')
+    proxy_access="${TEST_PROXY_ACCESS:-yes}"
+    printf '%s\n' "$proxy_access"
+    if [[ "$proxy_access" == no ]]; then
+      exit 1
+    fi
+    ;;
+  'auth can-i get pods -n teagram')
+    pod_read_access="${TEST_POD_READ_ACCESS:-no}"
+    printf '%s\n' "$pod_read_access"
+    if [[ "$pod_read_access" == no ]]; then
+      exit 1
+    fi
+    ;;
+  'auth can-i create pods --subresource=portforward -n teagram')
+    port_forward_access="${TEST_PORT_FORWARD_ACCESS:-no}"
+    printf '%s\n' "$port_forward_access"
+    if [[ "$port_forward_access" == no ]]; then
+      exit 1
+    fi
+    ;;
   *)
     echo "unexpected kubectl invocation: $*" >&2
     exit 2
@@ -598,13 +620,17 @@ SH
   }
 
   if ! run_identity_guard "$tmp/success.log" TEST_IDENTITY="$expected_identity" \
-    TEST_SECRET_ACCESS=no TEST_POD_ACCESS=no; then
+    TEST_SECRET_ACCESS=no TEST_POD_ACCESS=no TEST_PROXY_ACCESS=yes \
+    TEST_POD_READ_ACCESS=no TEST_PORT_FORWARD_ACCESS=no; then
     fail 'the deploy identity guard must accept the web identity with denied secret and pod access'
   fi
   cat >"$tmp/expected-calls" <<'EOF'
 auth whoami -o jsonpath={.status.userInfo.username}
 auth can-i get secrets -n teagram
 auth can-i create pods -n teagram
+auth can-i get services/teagram-web --subresource=proxy -n teagram
+auth can-i get pods -n teagram
+auth can-i create pods --subresource=portforward -n teagram
 EOF
   diff -u "$tmp/expected-calls" "$tmp/calls" >/dev/null ||
     fail 'the deploy identity guard must run each identity and permission check'
@@ -644,6 +670,24 @@ EOF
   fi
   grep -Fq '::error::kubectl auth can-i create pods -n teagram failed' "$tmp/pods-command-error.log" ||
     fail 'a kubectl auth can-i pods error must name the failed check'
+
+  if run_identity_guard "$tmp/proxy-failure.log" TEST_PROXY_ACCESS=no; then
+    fail 'the deploy identity guard accepted a denied service proxy permission'
+  fi
+  grep -Fq '::error::kubectl auth can-i get services/teagram-web --subresource=proxy -n teagram failed' "$tmp/proxy-failure.log" ||
+    fail 'a denied service proxy permission must name the failed check'
+
+  if run_identity_guard "$tmp/pod-read-failure.log" TEST_POD_READ_ACCESS=yes; then
+    fail 'the deploy identity guard accepted get pods access'
+  fi
+  grep -Fq '::error::kubectl auth can-i get pods -n teagram failed; expected no' "$tmp/pod-read-failure.log" ||
+    fail 'unexpected get pods access must name the failed check'
+
+  if run_identity_guard "$tmp/port-forward-failure.log" TEST_PORT_FORWARD_ACCESS=yes; then
+    fail 'the deploy identity guard accepted pod port-forward access'
+  fi
+  grep -Fq '::error::kubectl auth can-i create pods --subresource=portforward -n teagram failed; expected no' "$tmp/port-forward-failure.log" ||
+    fail 'unexpected pod port-forward access must name the failed check'
 )
 
 legacy_route_self_test() (
@@ -733,9 +777,25 @@ check_contract() {
     fail 'image-pin resolution must expose its image digest'
   [[ "$(query '.jobs.check-published-image-pin.outputs.origin')" == '${{ steps.target.outputs.origin }}' ]] ||
     fail 'image-pin resolution must expose the selected origin'
-  [[ "$(query '.concurrency.group')" == deploy-teagram-web &&
+  [[ "$(query '.concurrency.group')" == "$expected_concurrency_group" &&
     "$(query '.concurrency."cancel-in-progress"')" == false ]] ||
-    fail 'the workflow must serialize both origin deployments without cancelling the active run'
+    fail 'only eligible deployments may share the origin serialization group'
+  local valid_publication_group failed_publication_group
+  deployment_group_for() {
+    local event_name="$1" ref="$2" conclusion="$3" workflow_event="$4" run_id="$5" attempt="$6"
+    if [[ ( "$event_name" == workflow_dispatch && "$ref" == refs/heads/master ) ||
+      ( "$event_name" == workflow_run && "$conclusion" == success && "$workflow_event" == push ) ]]; then
+      printf 'deploy-teagram-web\n'
+    else
+      printf 'deploy-teagram-web-ineligible-%s-%s\n' "$run_id" "$attempt"
+    fi
+  }
+  valid_publication_group="$(deployment_group_for workflow_run refs/heads/master success push 9000 1)"
+  failed_publication_group="$(deployment_group_for workflow_run refs/heads/master failure push 9001 1)"
+  [[ "$valid_publication_group" == deploy-teagram-web &&
+    "$failed_publication_group" != "$valid_publication_group" &&
+    "$failed_publication_group" != "$(deployment_group_for workflow_run refs/heads/master failure push 9002 1)" ]] ||
+    fail 'a failed publication must not replace a queued valid deployment'
   [[ "$(query '.jobs.check-published-image-pin.concurrency // {} | length')" == 0 ]] ||
     fail 'image-pin resolution must not define a separate concurrency group'
   [[ "$(query '.jobs.deploy-web.concurrency // {} | length')" == 0 &&
@@ -800,7 +860,10 @@ check_contract() {
   [[ "$identity_guard_run" == *'kubectl auth whoami'* &&
     "$identity_guard_run" == *'system:serviceaccount:teagram:teagram-web-deployer'* &&
     "$identity_guard_run" == *'kubectl auth can-i get secrets -n teagram'* &&
-    "$identity_guard_run" == *'kubectl auth can-i create pods -n teagram'* ]] ||
+    "$identity_guard_run" == *'kubectl auth can-i create pods -n teagram'* &&
+    "$identity_guard_run" == *'kubectl auth can-i get services/teagram-web --subresource=proxy -n teagram'* &&
+    "$identity_guard_run" == *'kubectl auth can-i get pods -n teagram'* &&
+    "$identity_guard_run" == *'kubectl auth can-i create pods --subresource=portforward -n teagram'* ]] ||
     fail 'production must run the complete deploy identity and permission guard from the workflow revision'
   local kubeconfig_index tailnet_index identity_guard_index deploy_index step_name
   kubeconfig_index="$(query '.jobs.deploy-web.steps | to_entries | .[] | select(.value.name == "Install the deploy kubeconfig") | .key')"
@@ -827,11 +890,15 @@ check_contract() {
   [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the selected route, and roll back on failure") | .env.REQUIRE_SINGLE_CLOUDFLARED][0]')" == true ]] ||
     fail 'production must require exactly one ready k3s tunnel connector'
   [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the selected route, and roll back on failure") | .env.WEB_ORIGIN][0]')" == '${{ needs.check-published-image-pin.outputs.origin }}' &&
-    "$deploy_run" == *"smoke_url='http://127.0.0.1:18080/'"* &&
+    "$deploy_run" == *"smoke_url='http://127.0.0.1:18080/api/v1/namespaces/teagram/services/teagram-web/proxy/'"* &&
     "$deploy_run" == *'verify_route=fallback'* &&
     "$deploy_run" == *"smoke_url='https://web.teagram.io/'"* &&
     "$deploy_run" == *'verify_label=rollout'* ]] ||
-    fail 'production smoke must verify the public origin in k3s mode and the local fallback in Pages mode'
+    fail 'production smoke must verify the public origin in k3s mode and the API-proxied fallback in Pages mode'
+  grep -Fq 'kubectl proxy --address 127.0.0.1 --port 18080 --accept-hosts' .github/scripts/deploy-k8s-web.sh ||
+    fail 'Pages mode must serve the fallback through a loopback-only Kubernetes API proxy'
+  grep -Fq '"${smoke_url%/}/healthz?deploy=$deploy_sha"' .github/scripts/deploy-k8s-web.sh ||
+    fail 'Pages mode must probe the fallback service health route through the API proxy'
 
   local pages_settings_run pages_pull_run pages_audit_run pages_prepare_run pages_archive_run pages_verify_run
   pages_settings_run="$(query '[.jobs.deploy-pages.steps[] | select(.name == "Verify Pages settings and deployment policy") | .run][0]')"
@@ -928,6 +995,7 @@ self_test() {
     'del(.jobs.deploy-web.needs)'
     '.jobs.deploy-web.environment = "staging"'
     '.concurrency.group = "wrong-deploy"'
+    '.concurrency.group = "deploy-teagram-web"'
     '.concurrency."cancel-in-progress" = true'
     '.jobs.deploy-web.concurrency."cancel-in-progress" = true'
     '(.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the selected route, and roll back on failure") | .env.REQUIRE_SINGLE_CLOUDFLARED) = false'

@@ -1,3 +1,4 @@
+import {spawn} from 'node:child_process';
 import {
   mkdirSync,
   mkdtempSync,
@@ -8,7 +9,7 @@ import {
 } from 'node:fs';
 import {createServer} from 'node:http';
 import {tmpdir} from 'node:os';
-import {dirname, join} from 'node:path';
+import {dirname, join, resolve} from 'node:path';
 import {afterAll, describe, expect, it} from 'vitest';
 import {preparePagesSite} from '../.github/scripts/prepare-pages-site.mjs';
 import {RETIRED_VERSION_PATHS, SOURCE_COMMIT_PATH} from '../.github/scripts/pages-paths.mjs';
@@ -23,6 +24,7 @@ import {
 
 const temporaryDirectories = [];
 const sourceCommit = 'a'.repeat(40);
+const artifactDigest = `sha256:${'b'.repeat(64)}`;
 
 function temporaryDirectory() {
   const directory = mkdtempSync(join(tmpdir(), 'teagram-pages-deployment-'));
@@ -59,6 +61,92 @@ describe('requestText', () => {
         path: '/probe', timeoutMs: 1000
       });
       expect(result).toEqual({status: 200, body: 'pinned response\n'});
+    } finally {
+      await new Promise((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  });
+
+  it('rejects when a response closes after headers before its body completes', async() => {
+    const server = createServer((_request, response) => {
+      response.writeHead(200, {'content-type': 'text/plain'});
+      response.flushHeaders();
+      response.socket.destroy();
+    });
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+
+    try {
+      await expect(requestText({
+        protocol: 'http:', host: PAGES_HOST, ip: '127.0.0.1', port: server.address().port,
+        path: '/probe', timeoutMs: 1000
+      })).rejects.toMatchObject({code: 'ECONNRESET'});
+    } finally {
+      await new Promise((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  });
+});
+
+describe('smokeK8sWeb', () => {
+  it('keeps root-relative app paths under a Kubernetes service proxy prefix', async() => {
+    const requests = [];
+    const proxyPrefix = '/api/v1/namespaces/teagram/services/teagram-web/proxy/';
+    const server = createServer((request, response) => {
+      requests.push(request.url);
+      if(!request.url.startsWith(proxyPrefix)) {
+        response.writeHead(404).end();
+        return;
+      }
+
+      const path = request.url.slice(proxyPrefix.length).split('?')[0];
+      if(path === '') {
+        response.writeHead(200, {'content-type': 'text/html'});
+        response.end('<script src="/assets/app.js"></script>');
+      } else if(path === 'assets/app.js') {
+        response.writeHead(200, {'content-type': 'application/javascript'});
+        response.end('const app = true;');
+      } else if(path === 'mtproto-target.json') {
+        response.writeHead(200, {'content-type': 'application/json'});
+        response.end(JSON.stringify({sourceCommit, artifactDigest}));
+      } else {
+        response.writeHead(404).end();
+      }
+    });
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+
+    try {
+      const scriptPath = resolve(process.cwd(), '.github/scripts/smoke-k8s-web.mjs');
+      const child = spawn(process.execPath, [
+        scriptPath,
+        `http://127.0.0.1:${server.address().port}${proxyPrefix}`,
+        sourceCommit,
+        artifactDigest
+      ], {stdio: ['ignore', 'pipe', 'pipe']});
+      let stdout = '';
+      let stderr = '';
+      child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
+      child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
+      const exitCode = await new Promise((resolve, reject) => {
+        child.once('error', reject);
+        child.once('close', resolve);
+      });
+
+      expect(exitCode, stderr).toBe(0);
+      expect(stdout).toContain('/assets/app.js');
+      expect(stderr).toBe('');
+      expect(requests).toEqual([
+        `${proxyPrefix}?deploy=${sourceCommit}`,
+        `${proxyPrefix}assets/app.js`,
+        `${proxyPrefix}mtproto-target.json?deploy=${sourceCommit}`
+      ]);
     } finally {
       await new Promise((resolve, reject) => {
         server.close((error) => error ? reject(error) : resolve());

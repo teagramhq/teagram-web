@@ -59,6 +59,10 @@ export function requestText({protocol, host, ip, port, path, timeoutMs, maxRespo
         status: response.statusCode,
         body: Buffer.concat(chunks).toString('utf8')
       }));
+      response.on('aborted', () => rejectResponse(Object.assign(
+        new Error('response ended before the message completed'), {code: 'ECONNRESET'}
+      )));
+      response.on('error', rejectResponse);
     });
     request.setTimeout(timeoutMs, () => {
       request.destroy(Object.assign(new Error('version request timed out'), {code: 'ETIMEDOUT'}));

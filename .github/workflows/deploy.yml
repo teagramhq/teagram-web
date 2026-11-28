@@ -4,7 +4,7 @@ run-name: ${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue)
 
 # Keep both origins on one audited image pin across concurrent publications.
 concurrency:
-  group: deploy-teagram-web
+  group: ${{ ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) && 'deploy-teagram-web' || format('deploy-teagram-web-ineligible-{0}-{1}', github.run_id, github.run_attempt) }}
   cancel-in-progress: false
 
 # Deploy only image pins published from successful master commits. The image
@@ -453,6 +453,24 @@ jobs:
             exit 1
           fi
 
+          proxy_access="$(kubectl auth can-i get services/teagram-web --subresource=proxy -n teagram || true)"
+          if [[ "$proxy_access" != yes ]]; then
+            echo '::error::kubectl auth can-i get services/teagram-web --subresource=proxy -n teagram failed; expected yes'
+            exit 1
+          fi
+
+          pod_read_access="$(kubectl auth can-i get pods -n teagram || true)"
+          if [[ "$pod_read_access" != no ]]; then
+            echo '::error::kubectl auth can-i get pods -n teagram failed; expected no'
+            exit 1
+          fi
+
+          port_forward_access="$(kubectl auth can-i create pods --subresource=portforward -n teagram || true)"
+          if [[ "$port_forward_access" != no ]]; then
+            echo '::error::kubectl auth can-i create pods --subresource=portforward -n teagram failed; expected no'
+            exit 1
+          fi
+
       - name: Deploy, verify the selected route, and roll back on failure
         env:
           DEPLOY_SHA: ${{ steps.refresh.outputs.sha }}
@@ -463,7 +481,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$WEB_ORIGIN" == pages ]]; then
-            smoke_url='http://127.0.0.1:18080/'
+            smoke_url='http://127.0.0.1:18080/api/v1/namespaces/teagram/services/teagram-web/proxy/'
             verify_route=fallback
             verify_label=fallback
           else

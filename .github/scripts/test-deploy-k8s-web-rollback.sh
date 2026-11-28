@@ -23,6 +23,7 @@ run_case() {
   if [[ "$case_name" == fallback_* ]]; then
     verification_route=fallback
     verification_label=fallback
+    smoke_url='http://127.0.0.1:18080/api/v1/namespaces/teagram/services/teagram-web/proxy/'
   fi
   if [[ "$expected_failure" == jq-* ]]; then
     run_deploy=(timeout --kill-after=2s 12s bash)
@@ -57,8 +58,8 @@ case "$1 $2" in
     fi
     ;;
   'rollout undo')
-    if [[ "${TEST_FAILURE:-}" == fallback-probe && ! -f "$PORT_FORWARD_CLEANUP_FILE" ]]; then
-      echo 'port-forward was not cleaned up before rollback' >&2
+    if [[ "${TEST_FAILURE:-}" == fallback-probe && ! -f "$API_PROXY_CLEANUP_FILE" ]]; then
+      echo 'Kubernetes API proxy was not cleaned up before rollback' >&2
       exit 1
     fi
     : >"$ROLLBACK_STARTED_FILE"
@@ -66,12 +67,12 @@ case "$1 $2" in
       exit 1
     fi
     ;;
-  'port-forward --address')
-    printf '%s\n' "$$" >"$PORT_FORWARD_PID_FILE"
+  'proxy --address')
+    printf '%s\n' "$$" >"$API_PROXY_PID_FILE"
     if [[ "${TEST_FAILURE:-}" == fallback-probe ]]; then
-      printf 'kubectl port-forward: simulated connection reset\n' >&2
+      printf 'kubectl proxy: serving the fallback service route\n' >&2
     fi
-    trap 'printf cleaned >"$PORT_FORWARD_CLEANUP_FILE"; exit 0' TERM INT
+    trap 'printf cleaned >"$API_PROXY_CLEANUP_FILE"; exit 0' TERM INT
     while :; do read -r -t 1 _ || true; done
     ;;
   'apply --dry-run=server') ;;
@@ -135,6 +136,7 @@ SH
 set -euo pipefail
 printf 'curl %s\n' "$*" >>"$KUBECTL_LOG"
 if [[ "${TEST_FAILURE:-}" == fallback-probe ]]; then
+  printf 'curl: simulated service proxy connection reset\n' >&2
   exit 22
 fi
 printf 'ok'
@@ -178,8 +180,8 @@ SH
     STATUS_COUNT_FILE="$tmp/$case_name-status-count" \
     GET_COUNT_FILE="$tmp/$case_name-get-count" \
     ROLLBACK_STARTED_FILE="$tmp/$case_name-rollback-started" \
-    PORT_FORWARD_PID_FILE="$tmp/$case_name-port-forward-pid" \
-    PORT_FORWARD_CLEANUP_FILE="$tmp/$case_name-port-forward-cleanup" \
+    API_PROXY_PID_FILE="$tmp/$case_name-api-proxy-pid" \
+    API_PROXY_CLEANUP_FILE="$tmp/$case_name-api-proxy-cleanup" \
     REAL_JQ="$real_jq" REAL_SLEEP="$real_sleep" \
     JQ_PID_FILE="$tmp/$case_name-jq-pid" \
     KUBECTL_PID_FILE="$tmp/$case_name-kubectl-pid" \
@@ -227,18 +229,22 @@ SH
   fi
 
   if [[ "$case_name" == fallback_* ]]; then
-    grep -Fqx 'port-forward --address 127.0.0.1 --namespace teagram service/teagram-web 18080:80' "$log" ||
-      fail "$case_name did not start the service port-forward"
-    grep -Fq "/healthz?deploy=$deploy_sha" "$log" || fail "$case_name did not probe the fallback health route"
-    [[ -f "$tmp/$case_name-port-forward-pid" ]] || fail "$case_name did not record the port-forward process"
-    [[ -f "$tmp/$case_name-port-forward-cleanup" ]] || fail "$case_name did not clean up the port-forward process"
-    local port_forward_pid process_state
-    read -r port_forward_pid <"$tmp/$case_name-port-forward-pid"
-    process_state="$(ps -o stat= -p "$port_forward_pid" || true)"
+    grep -Fqx "proxy --address 127.0.0.1 --port 18080 --accept-hosts ^127\\.0\\.0\\.1$" "$log" ||
+      fail "$case_name did not start a loopback-only Kubernetes API proxy"
+    grep -Fq "/api/v1/namespaces/teagram/services/teagram-web/proxy/healthz?deploy=$deploy_sha" "$log" ||
+      fail "$case_name did not probe fallback health through the service proxy API"
+    if grep -Fq 'port-forward' "$log"; then
+      fail "$case_name used pod port-forward instead of the service proxy route"
+    fi
+    [[ -f "$tmp/$case_name-api-proxy-pid" ]] || fail "$case_name did not record the API proxy process"
+    [[ -f "$tmp/$case_name-api-proxy-cleanup" ]] || fail "$case_name did not clean up the API proxy process"
+    local api_proxy_pid process_state
+    read -r api_proxy_pid <"$tmp/$case_name-api-proxy-pid"
+    process_state="$(ps -o stat= -p "$api_proxy_pid" || true)"
     process_state="${process_state//[[:space:]]/}"
     if [[ -n "$process_state" && "$process_state" != Z* ]]; then
-      kill "$port_forward_pid" 2>/dev/null || true
-      fail "$case_name left the port-forward process running"
+      kill "$api_proxy_pid" 2>/dev/null || true
+      fail "$case_name left the Kubernetes API proxy process running"
     fi
 
     if [[ "$expected_result" == success ]]; then
@@ -258,11 +264,11 @@ SH
     grep -Fq 'the fallback route did not become ready' "$output" ||
       fail "$case_name did not report the failed fallback readiness probe"
     if [[ "$expected_failure" == fallback-probe ]]; then
-      local port_forward_line fallback_failure_line
-      port_forward_line="$(grep -n -F 'kubectl port-forward: simulated connection reset' "$output" | cut -d: -f1 || true)"
+      local api_proxy_line fallback_failure_line
+      api_proxy_line="$(grep -n -F 'kubectl proxy: serving the fallback service route' "$output" | cut -d: -f1 || true)"
       fallback_failure_line="$(grep -n -F 'the fallback route did not become ready' "$output" | cut -d: -f1 || true)"
-      [[ -n "$port_forward_line" && -n "$fallback_failure_line" && "$port_forward_line" -lt "$fallback_failure_line" ]] ||
-        fail "$case_name did not print the port-forward diagnostic before failing the readiness probe"
+      [[ -n "$api_proxy_line" && -n "$fallback_failure_line" && "$api_proxy_line" -lt "$fallback_failure_line" ]] ||
+        fail "$case_name did not print the service proxy diagnostic before failing the readiness probe"
     fi
     if grep -Fq 'fallback=verified sha=' "$output"; then
       fail "$case_name printed the fallback verification marker after a failed probe"

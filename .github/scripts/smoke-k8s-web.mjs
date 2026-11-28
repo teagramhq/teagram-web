@@ -1,4 +1,5 @@
 const baseUrl = new URL(process.argv[2] || 'http://127.0.0.1:8080');
+if(!baseUrl.pathname.endsWith('/')) baseUrl.pathname += '/';
 const expectedSourceCommit = process.argv[3];
 const expectedArtifactDigest = process.argv[4];
 
@@ -29,7 +30,7 @@ if(!scriptPath) {
   throw new Error('web root did not reference a JavaScript app bundle');
 }
 
-const bundleUrl = new URL(scriptPath, baseUrl);
+const bundleUrl = new URL(scriptPath.replace(/^\/+/, ''), baseUrl);
 const bundleResponse = await fetch(bundleUrl);
 if(!bundleResponse.ok) {
   throw new Error(`app bundle returned HTTP ${bundleResponse.status}: ${bundleUrl.pathname}`);
@@ -46,7 +47,7 @@ if(bundle.byteLength === 0) {
 }
 
 if(expectedSourceCommit !== undefined) {
-  const targetUrl = new URL(`/mtproto-target.json?deploy=${expectedSourceCommit}`, baseUrl);
+  const targetUrl = new URL(`mtproto-target.json?deploy=${expectedSourceCommit}`, baseUrl);
   const targetResponse = await fetch(targetUrl, {cache: 'no-store'});
   if(!targetResponse.ok) {
     throw new Error(`artifact manifest returned HTTP ${targetResponse.status}`);

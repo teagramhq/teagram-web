@@ -21,18 +21,17 @@ require_single_cloudflared=${REQUIRE_SINGLE_CLOUDFLARED:-false}
 deployment_started=false
 previous_revision=
 previous_image=
-port_forward_pid=
-port_forward_log=
+api_proxy_pid=
 
-cleanup_port_forward() {
-  if [[ -n "$port_forward_pid" ]]; then
-    kill "$port_forward_pid" 2>/dev/null || true
-    wait "$port_forward_pid" 2>/dev/null || true
-    port_forward_pid=
+cleanup_api_proxy() {
+  if [[ -n "$api_proxy_pid" ]]; then
+    kill "$api_proxy_pid" 2>/dev/null || true
+    wait "$api_proxy_pid" 2>/dev/null || true
+    api_proxy_pid=
   fi
 }
 
-trap cleanup_port_forward EXIT
+trap cleanup_api_proxy EXIT
 
 fail() {
   printf 'web deploy: %s\n' "$1" >&2
@@ -51,7 +50,7 @@ rollback_failure() {
 rollback_on_error() {
   local status="$1"
   trap - ERR INT TERM
-  cleanup_port_forward
+  cleanup_api_proxy
 
   if [[ "$deployment_started" == true ]]; then
     printf 'deploy failed; restoring teagram-web revision %s\n' "$previous_revision" >&2
@@ -96,7 +95,7 @@ trap 'rollback_on_error 143' TERM
 if [[ "$verification_route" == public ]]; then
   [[ "$verification_label" == rollout ]] || fail 'the public route must use the rollout verification label'
 else
-  [[ "$verification_label" == fallback && "$smoke_url" == 'http://127.0.0.1:18080/' ]] ||
+  [[ "$verification_label" == fallback && "$smoke_url" == 'http://127.0.0.1:18080/api/v1/namespaces/teagram/services/teagram-web/proxy/' ]] ||
     fail 'the fallback route must use its local service URL and fallback verification label'
 fi
 [[ "$require_single_cloudflared" == true || "$require_single_cloudflared" == false ]] ||
@@ -179,16 +178,16 @@ deployed_image=$(kubectl get "deployment/$deployment" --namespace "$namespace" -
 [[ "$deployed_image" == "$deploy_image" ]] || fail 'the deployment image does not match the reviewed pin'
 
 if [[ "$verification_route" == fallback ]]; then
-  port_forward_log="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/teagram-web-fallback-port-forward-$$.log"
-  kubectl port-forward --address 127.0.0.1 --namespace "$namespace" \
-    "service/$deployment" 18080:80 > "$port_forward_log" 2>&1 &
-  port_forward_pid=$!
+  api_proxy_log="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/teagram-web-fallback-api-proxy-$$.log"
+  kubectl proxy --address 127.0.0.1 --port 18080 --accept-hosts '^127\.0\.0\.1$' \
+    > "$api_proxy_log" 2>&1 &
+  api_proxy_pid=$!
   fallback_ready=false
   for attempt in {1..30}; do
-    if ! kill -0 "$port_forward_pid" 2>/dev/null; then
+    if ! kill -0 "$api_proxy_pid" 2>/dev/null; then
       break
     fi
-    if health=$(curl -q --noproxy '*' --fail --silent --max-time 2 \
+    if health=$(curl -q --noproxy '*' --fail --silent --show-error --max-time 2 \
       "${smoke_url%/}/healthz?deploy=$deploy_sha") && [[ "$health" == ok ]]; then
       fallback_ready=true
       break
@@ -196,7 +195,7 @@ if [[ "$verification_route" == fallback ]]; then
     sleep 1
   done
   if [[ "$fallback_ready" != true ]]; then
-    cat "$port_forward_log" >&2
+    cat "$api_proxy_log" >&2
     fail 'the fallback route did not become ready'
   fi
 fi
