@@ -489,6 +489,41 @@ func TestPatchErrorThatAppliedTransitionRecoversOnRevalidation(t *testing.T) {
 	}
 }
 
+func TestPendingSaveThatPersistsBeforeErrorRecoversAndRestarts(t *testing.T) {
+	config := testConfig()
+	config.WritesEnabled = true
+	state := &memoryStateStore{
+		state:                  PersistentState{Target: config.PagesTarget},
+		saveErrorsAfterPersist: []error{errors.New("simulated timeout after journal persisted")},
+	}
+	client := &mutableRecordClient{record: testRecord(config, config.PagesTarget)}
+	var logs bytes.Buffer
+	controller, err := NewController(context.Background(), config, client, state, log.New(&logs, "", 0), NewMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	for attempt := 0; attempt < 3; attempt++ {
+		controller.observe(context.Background(), start.Add(time.Duration(attempt)*probeInterval), errors.New("probe failed"))
+	}
+	if !controller.SafetyLocked() || state.state.Pending == nil || len(client.patched) != 0 {
+		t.Fatalf("timed-out journal save did not leave an unsubmitted intent safely locked: locked=%t state=%#v patches=%v", controller.SafetyLocked(), state.state, client.patched)
+	}
+
+	controller.retryRecordValidation(context.Background())
+	if controller.SafetyLocked() || state.state.Pending != nil || state.state.Target != config.PagesTarget {
+		t.Fatalf("revalidation did not clear the unsubmitted intent after the timeout: locked=%t state=%#v logs=%s", controller.SafetyLocked(), state.state, logs.String())
+	}
+
+	restarted, err := NewController(context.Background(), config, client, state, log.New(&logs, "", 0), NewMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restarted.SafetyLocked() {
+		t.Fatalf("restart remained locked after revalidation cleared the pending intent: %#v", state.state)
+	}
+}
+
 func TestVerifiedPendingSaveRetriesOnRevalidation(t *testing.T) {
 	config := testConfig()
 	config.WritesEnabled = true
@@ -702,10 +737,11 @@ func (client *fakeRecordClient) PatchTarget(_ context.Context, target string) (D
 }
 
 type memoryStateStore struct {
-	state      PersistentState
-	loadErrors []error
-	saveErrors []error
-	saveHook   func(PersistentState)
+	state                  PersistentState
+	loadErrors             []error
+	saveErrors             []error
+	saveErrorsAfterPersist []error
+	saveHook               func(PersistentState)
 }
 
 type mutableRecordClient struct {
@@ -780,6 +816,13 @@ func (store *memoryStateStore) Save(_ context.Context, state PersistentState) er
 	store.state = state
 	if store.saveHook != nil {
 		store.saveHook(state)
+	}
+	if len(store.saveErrorsAfterPersist) != 0 {
+		err := store.saveErrorsAfterPersist[0]
+		store.saveErrorsAfterPersist = store.saveErrorsAfterPersist[1:]
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }

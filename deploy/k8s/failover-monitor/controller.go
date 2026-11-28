@@ -381,14 +381,14 @@ func (controller *Controller) switchTo(ctx context.Context, target, reason strin
 		Changes: controller.history,
 		Pending: &PendingTransition{From: controller.target, To: target, At: now},
 	}
+	attemptedPending := *pendingState.Pending
+	controller.pendingPatchRecovery = &attemptedPending
+	controller.pendingPatchAttempted = false
 	if err := controller.stateStore.Save(ctx, pendingState); err != nil {
 		controller.recordSafe = false
 		controller.alert("state_pending_failed", messageWithSafeCause("DNS update was not attempted because its pending transition could not be saved", err))
 		return
 	}
-	attemptedPending := *pendingState.Pending
-	controller.pendingPatchRecovery = &attemptedPending
-	controller.pendingPatchAttempted = false
 	intentCheckRecord, err := controller.recordClient.GetRecord(ctx)
 	if err != nil {
 		controller.cancelPendingTransition(
