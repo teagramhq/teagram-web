@@ -7,8 +7,8 @@ import {RETIRED_VERSION_URLS} from './pages-paths.mjs';
 export const PAGES_HOST = 'web.teagram.io';
 export const VERSION_PATH = '/.well-known/teagram-web/source-commit.txt';
 export {RETIRED_VERSION_URLS};
-// These are GitHub Pages' documented IPv4 targets. k3s mode pins requests here
-// so verification cannot follow the public DNS record to the current origin.
+// These are GitHub Pages' documented IPv4 targets. Pinned requests verify the
+// Pages origin directly instead of following public DNS to the active origin.
 export const PAGES_IPS = [
   '185.199.108.153',
   '185.199.109.153',
@@ -99,6 +99,47 @@ function errorLabel(error) {
   return typeof error?.code === 'string' ? error.code : 'request-failed';
 }
 
+async function verifyPinnedPagesIps({sourceCommit, request, timeoutMs, allowHttpFallback}) {
+  let lastFailure = 'no response';
+
+  for(const ip of PAGES_IPS) {
+    let protocol = 'https:';
+    let response;
+    try {
+      response = await request({
+        protocol, host: PAGES_HOST, ip, path: requestPath(sourceCommit), timeoutMs
+      });
+    } catch(error) {
+      if(!allowHttpFallback || !isCertificateNotReady(error)) {
+        lastFailure = `${errorLabel(error)} at ${ip}`;
+        continue;
+      }
+      protocol = 'http:';
+      try {
+        response = await request({
+          protocol, host: PAGES_HOST, ip, path: requestPath(sourceCommit), timeoutMs
+        });
+      } catch(fallbackError) {
+        lastFailure = `${errorLabel(fallbackError)} at ${ip}`;
+        continue;
+      }
+    }
+
+    if(!responseMatches(response, sourceCommit)) {
+      lastFailure = `HTTP ${response?.status ?? 'unknown'} at ${ip}`;
+      continue;
+    }
+
+    const routeFailure = await retiredVersionPathFailure({
+      protocol, host: PAGES_HOST, ip, sourceCommit, request, timeoutMs
+    });
+    if(!routeFailure) return {result: {transport: protocol.slice(0, -1), ip}, failure: null};
+    lastFailure = `${routeFailure} at ${ip}`;
+  }
+
+  return {result: null, failure: lastFailure};
+}
+
 export async function verifyPagesOrigin({
   origin,
   sourceCommit,
@@ -130,8 +171,15 @@ export async function verifyPagesOrigin({
           const routeFailure = await retiredVersionPathFailure({
             protocol: 'https:', host: PAGES_HOST, sourceCommit, request, timeoutMs: requestTimeoutMs
           });
-          if(!routeFailure) return {transport: 'https', ip: undefined};
-          lastResult = routeFailure;
+          if(routeFailure) {
+            lastResult = routeFailure;
+          } else {
+            const pinned = await verifyPinnedPagesIps({
+              sourceCommit, request, timeoutMs: requestTimeoutMs, allowHttpFallback: false
+            });
+            if(pinned.result) return pinned.result;
+            lastResult = `direct Pages IP check failed: ${pinned.failure}`;
+          }
         } else {
           lastResult = `HTTP ${response.status ?? 'unknown'}`;
         }
@@ -139,45 +187,11 @@ export async function verifyPagesOrigin({
         lastResult = errorLabel(error);
       }
     } else {
-      for(const ip of PAGES_IPS) {
-        try {
-          const response = await request({
-            protocol: 'https:', host: PAGES_HOST, ip, path, timeoutMs: requestTimeoutMs
-          });
-          if(responseMatches(response, sourceCommit)) {
-            const routeFailure = await retiredVersionPathFailure({
-              protocol: 'https:', host: PAGES_HOST, ip, sourceCommit, request, timeoutMs: requestTimeoutMs
-            });
-            if(!routeFailure) return {transport: 'https', ip};
-            lastResult = `${routeFailure} at ${ip}`;
-          } else {
-            lastResult = `HTTP ${response.status ?? 'unknown'} at ${ip}`;
-          }
-          continue;
-        } catch(error) {
-          if(!isCertificateNotReady(error)) {
-            lastResult = `${errorLabel(error)} at ${ip}`;
-            continue;
-          }
-        }
-
-        try {
-          const response = await request({
-            protocol: 'http:', host: PAGES_HOST, ip, path, timeoutMs: requestTimeoutMs
-          });
-          if(responseMatches(response, sourceCommit)) {
-            const routeFailure = await retiredVersionPathFailure({
-              protocol: 'http:', host: PAGES_HOST, ip, sourceCommit, request, timeoutMs: requestTimeoutMs
-            });
-            if(!routeFailure) return {transport: 'http', ip};
-            lastResult = `${routeFailure} at ${ip}`;
-          } else {
-            lastResult = `HTTP ${response.status ?? 'unknown'} at ${ip}`;
-          }
-        } catch(error) {
-          lastResult = `${errorLabel(error)} at ${ip}`;
-        }
-      }
+      const pinned = await verifyPinnedPagesIps({
+        sourceCommit, request, timeoutMs: requestTimeoutMs, allowHttpFallback: true
+      });
+      if(pinned.result) return pinned.result;
+      lastResult = pinned.failure;
     }
 
     if(now() >= deadline) break;

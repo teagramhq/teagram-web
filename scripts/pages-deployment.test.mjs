@@ -115,7 +115,7 @@ describe('verifyPagesOrigin', () => {
     ]);
   });
 
-  it('uses normal HTTPS and never downgrades in Pages mode', async() => {
+  it('keeps the public HTTPS poll and verifies Pages directly over pinned HTTPS', async() => {
     const requests = [];
     let time = 0;
     const result = await verifyPagesOrigin({
@@ -132,14 +132,45 @@ describe('verifyPagesOrigin', () => {
       timeoutMs: 1000
     });
 
-    expect(result).toEqual({transport: 'https', ip: undefined});
+    expect(result).toEqual({transport: 'https', ip: PAGES_IPS[0]});
     expect(requests).toEqual([
       {protocol: 'https:', host: PAGES_HOST, path: `${VERSION_PATH}?deploy=${sourceCommit}`, timeoutMs: 8000},
       ...RETIRED_VERSION_URLS.map((path) => ({
         protocol: 'https:', host: PAGES_HOST, path: `${path}?deploy=${sourceCommit}`, timeoutMs: 8000,
         maxResponseBytes: 65536
+      })),
+      {protocol: 'https:', host: PAGES_HOST, ip: PAGES_IPS[0], path: `${VERSION_PATH}?deploy=${sourceCommit}`, timeoutMs: 8000},
+      ...RETIRED_VERSION_URLS.map((path) => ({
+        protocol: 'https:', host: PAGES_HOST, ip: PAGES_IPS[0], path: `${path}?deploy=${sourceCommit}`, timeoutMs: 8000,
+        maxResponseBytes: 65536
       }))
     ]);
+  });
+
+  it('does not accept a matching public fallback when the pinned Pages origin is stale', async() => {
+    const requests = [];
+    const staleCommit = 'b'.repeat(40);
+    await expect(verifyPagesOrigin({
+      origin: 'pages',
+      sourceCommit,
+      request: async(options) => {
+        requests.push(options);
+        if(options.path.startsWith(VERSION_PATH)) {
+          return {status: 200, body: `${options.ip ? staleCommit : sourceCommit}\n`};
+        }
+        return {status: 404, body: ''};
+      },
+      now: () => 0,
+      timeoutMs: 0
+    })).rejects.toThrow(/direct Pages IP check failed: HTTP 200 at/);
+
+    expect(requests[0]).toMatchObject({
+      protocol: 'https:', host: PAGES_HOST, path: `${VERSION_PATH}?deploy=${sourceCommit}`
+    });
+    const pinnedRequests = requests.filter(({ip}) => ip);
+    expect(pinnedRequests.map(({ip}) => ip)).toEqual(PAGES_IPS);
+    expect(pinnedRequests.every(({protocol, host}) => protocol === 'https:' && host === PAGES_HOST)).toBe(true);
+    expect(requests.every(({protocol}) => protocol === 'https:')).toBe(true);
   });
 
   it('fails unless both retired version paths return 404', async() => {
