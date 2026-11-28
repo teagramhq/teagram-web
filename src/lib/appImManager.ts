@@ -108,6 +108,7 @@ import liteMode, {LiteModeKey} from '@helpers/liteMode';
 import LottiePlayer from '@lib/lottie/lottiePlayer';
 import PopupGiftPremium from '@components/popups/giftPremium';
 import internalLinkProcessor from '@lib/internalLinkProcessor';
+import {getRuntimeServerId} from '@config/serverContext';
 import {INTERNAL_LINK_TYPE} from '@lib/internalLink';
 import {createStoriesViewerWithPeer} from '@components/stories/viewer';
 import type {CustomEmojiRendererElement} from '@lib/customEmoji/renderer';
@@ -1900,7 +1901,7 @@ export class AppImManager extends EventListenerBase<{
       );
       appNavigationController.overrideHash('');
       // The decoder is a separate chunk: it stays off the startup path until a fragment link arrives.
-      void import('@lib/fragmentLinkOpen').then(({openFragmentLink}) => openFragmentLink(hash)).catch(() => {});
+      void import('@lib/fragmentLinkOpen').then(({openFragmentLink}) => openFragmentLink(hash, getRuntimeServerId() === 'default')).catch(() => {});
       return;
     }
 

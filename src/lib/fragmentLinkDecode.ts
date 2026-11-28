@@ -1,4 +1,3 @@
-import {getRuntimeServerId} from '@config/serverContext';
 import {
   FragmentLinkError,
   MAX_ID,
@@ -101,7 +100,7 @@ function splitFields(data: Uint8Array, count: number) {
   return fields;
 }
 
-export function dispatchDefaultServerFragmentLink(fragment: string, dispatch: (link: FragmentLink) => void) {
+export function dispatchDefaultServerFragmentLink(fragment: string, dispatch: (link: FragmentLink) => void, isDefaultServer: boolean) {
   if(!fragment.startsWith('#~')) return false;
 
   let link: FragmentLink;
@@ -112,7 +111,7 @@ export function dispatchDefaultServerFragmentLink(fragment: string, dispatch: (l
     throw error;
   }
 
-  if(link.host || getRuntimeServerId() !== 'default') return true;
+  if(link.host || !isDefaultServer) return true;
   dispatch(link);
   return true;
 }

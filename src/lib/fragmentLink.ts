@@ -1,5 +1,4 @@
-import {normalizeServerHost} from '@config/serverSelection';
-import {getActiveServerHost, getRuntimeServerId} from '@config/serverContext';
+import {normalizeServerHost} from '@config/serverHost';
 
 export const VERSION = 1;
 const DEFAULT_LINK_HOST = 'server.teagram.io';
@@ -168,10 +167,8 @@ export function encodeBase64Url(value: Uint8Array) {
   return encodeBase64URL(value);
 }
 
-export function createFragmentLinkURL(link: FragmentLink) {
-  const serverId = getRuntimeServerId();
-  const host = serverId === 'default' ? undefined : getActiveServerHost();
-  if(serverId !== 'default' && !host) throw new Error('Active server host is unavailable');
+// `host` is the active custom server's host; the default server has none.
+export function createFragmentLinkURL(link: FragmentLink, host?: string) {
   const target = {...link, host} as FragmentLink;
   return `https://web.teagram.io/${encodeFragmentLink(target)}`;
 }

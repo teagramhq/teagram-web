@@ -8,6 +8,7 @@ import {
   FragmentLinkError,
   type FragmentLink
 } from '@/lib/fragmentLink';
+import {buildFragmentLinkURL} from '@/helpers/fragmentLinkURL';
 import {decodeFragmentLink, dispatchDefaultServerFragmentLink} from '@/lib/fragmentLinkDecode';
 
 type VectorInput = {
@@ -97,8 +98,8 @@ describe('v1 fragment link codec', () => {
     const dispatch = vi.fn(() => { void fetch('/should-not-run'); });
 
     try {
-      expect(dispatchDefaultServerFragmentLink('#~*', dispatch)).toBe(true);
-      expect(dispatchDefaultServerFragmentLink('#~YQsL89lf9Nd0cL6ssQHDpNc', dispatch)).toBe(true);
+      expect(dispatchDefaultServerFragmentLink('#~*', dispatch, true)).toBe(true);
+      expect(dispatchDefaultServerFragmentLink('#~YQsL89lf9Nd0cL6ssQHDpNc', dispatch, true)).toBe(true);
       expect(dispatch).not.toHaveBeenCalled();
       expect(request).not.toHaveBeenCalled();
     } finally {
@@ -108,26 +109,21 @@ describe('v1 fragment link codec', () => {
 
   it('does not dispatch default-host links from a custom server runtime', () => {
     const dispatch = vi.fn();
-    vi.stubGlobal('__TEAGRAM_ACTIVE_SERVER_ID__', `custom-${'a'.repeat(64)}`);
 
-    try {
-      expect(dispatchDefaultServerFragmentLink('#~QQHDpNc', dispatch)).toBe(true);
-      expect(dispatch).not.toHaveBeenCalled();
-    } finally {
-      vi.unstubAllGlobals();
-    }
+    expect(dispatchDefaultServerFragmentLink('#~QQHDpNc', dispatch, false)).toBe(true);
+    expect(dispatch).not.toHaveBeenCalled();
   });
 
-  it('builds hosted links for a custom server without making them dispatchable here', () => {
+  it('builds hosted links for a custom server without making them dispatchable here', async() => {
     const customServerId = `custom-${'a'.repeat(64)}`;
     const dispatch = vi.fn();
     vi.stubGlobal('__TEAGRAM_ACTIVE_SERVER_ID__', customServerId);
     vi.stubGlobal('__TEAGRAM_ACTIVE_SERVER_HOST__', 'chat.example.org');
 
     try {
-      const url = createFragmentLinkURL({type: 1, username: 'alice'});
+      const url = await buildFragmentLinkURL({type: 1, username: 'alice'});
       expect(url).toBe('https://web.teagram.io/#~YQsL89lf9Nd0cL6ssQHDpNc');
-      expect(dispatchDefaultServerFragmentLink(new URL(url).hash, dispatch)).toBe(true);
+      expect(dispatchDefaultServerFragmentLink(new URL(url).hash, dispatch, false)).toBe(true);
       expect(dispatch).not.toHaveBeenCalled();
     } finally {
       vi.unstubAllGlobals();

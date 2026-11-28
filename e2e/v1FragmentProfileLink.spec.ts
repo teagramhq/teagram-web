@@ -7,7 +7,7 @@ test('dispatches a v1 profile link in the browser runtime', async({page}) => {
     const moduleUrl = new URL('/src/lib/fragmentLinkDecode.ts', location.origin).href;
     const {dispatchDefaultServerFragmentLink} = await import(moduleUrl);
     const handled: unknown[] = [];
-    const didHandle = dispatchDefaultServerFragmentLink(location.hash, (link: unknown) => handled.push(link));
+    const didHandle = dispatchDefaultServerFragmentLink(location.hash, (link: unknown) => handled.push(link), true);
     return {didHandle, handled};
   });
 

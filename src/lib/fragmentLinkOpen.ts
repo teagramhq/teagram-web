@@ -46,6 +46,6 @@ function processFragmentLink(link: FragmentLink) {
   }
 }
 
-export function openFragmentLink(fragment: string) {
-  return dispatchDefaultServerFragmentLink(fragment, processFragmentLink);
+export function openFragmentLink(fragment: string, isDefaultServer: boolean) {
+  return dispatchDefaultServerFragmentLink(fragment, processFragmentLink, isDefaultServer);
 }
