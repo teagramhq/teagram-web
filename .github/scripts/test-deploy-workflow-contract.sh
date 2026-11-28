@@ -6,6 +6,7 @@ set -euo pipefail
 
 workflow="${DEPLOY_WORKFLOW:-.github/workflows/deploy.yml}"
 expected_if="\${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}"
+expected_concurrency_group="\${{ ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) && 'deploy-teagram-web' || format('deploy-teagram-web-ineligible-{0}-{1}', github.run_id, github.run_attempt) }}"
 expected_deploy_if="\${{ needs.check-published-image-pin.outputs.skip == 'false' }}"
 expected_run_name="\${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || '' }}"
 expected_issue_description='Issue key to report this run to (e.g. MAIN-123). Leave empty for no report.'
@@ -194,6 +195,7 @@ SH
   export GITHUB_OUTPUT="$tmp/output" GH_TOKEN=test TEST_RUNS
 
   local expected expected_run_id expected_digest expected_name status
+  unset WEB_ORIGIN
   GITHUB_EVENT_NAME=workflow_run
   TEST_EVENT_PUBLICATION=true
   TEST_LATEST_PUBLICATION=true
@@ -228,6 +230,7 @@ SH
     expected_name="$TEST_PIN_PREFIX$expected-$expected_digest"
     grep -Fxq "artifact_name=$expected_name" "$GITHUB_OUTPUT" || fail "wrong image pin for workflow_run comparison $status"
     grep -Fxq "image_digest=$expected_digest" "$GITHUB_OUTPUT" || fail "wrong image digest for workflow_run comparison $status"
+    grep -Fxq 'origin=k3s' "$GITHUB_OUTPUT" || fail "unset WEB_ORIGIN must default to k3s for comparison $status"
     if [[ "$status" == behind ]]; then
       grep -Fq "latest publication $TEST_LATEST_SHA is behind; keeping event SHA $RUN_HEAD_SHA" "$tmp/behind.out" ||
         fail 'a behind comparison must log the event SHA it keeps'
@@ -451,6 +454,27 @@ SH
   if bash -euo pipefail "$tmp/target.sh" >/dev/null; then
     fail 'an invalid publication event SHA must fail the deploy'
   fi
+
+  RUN_ID=100
+  RUN_HEAD_SHA="$TEST_EVENT_SHA"
+  TEST_EVENT_RUN_ID=100
+  TEST_EVENT_PUBLICATION=true
+  TEST_LATEST_RUN_ID=200
+  TEST_LATEST_SHA="$TEST_EVENT_SHA"
+  TEST_LATEST_PUBLICATION=true
+  TEST_RUNS="$TEST_LATEST_RUN_ID"$'\t'"$TEST_LATEST_SHA"$'\n'"$RUN_ID"$'\t'"$RUN_HEAD_SHA"
+  TEST_COMPARISON=identical
+  export WEB_ORIGIN=pages
+  : >"$GITHUB_OUTPUT"
+  bash -euo pipefail "$tmp/target.sh" >/dev/null
+  grep -Fxq 'origin=pages' "$GITHUB_OUTPUT" || fail 'the Pages origin setting must reach the deploy jobs'
+
+  export WEB_ORIGIN=invalid
+  if bash -euo pipefail "$tmp/target.sh" >"$tmp/invalid-origin.out" 2>&1; then
+    fail 'an unsupported WEB_ORIGIN value must fail the deploy target resolver'
+  fi
+  grep -Fq '::error::WEB_ORIGIN must be k3s or pages' "$tmp/invalid-origin.out" ||
+    fail 'an unsupported WEB_ORIGIN value must have a distinct diagnostic'
 )
 
 check_kubeconfig_validation() (
@@ -521,6 +545,9 @@ check_deploy_identity_guard_behavior() (
   expected_identity='system:serviceaccount:teagram:teagram-web-deployer'
   legacy_pin="$tmp/legacy-pin"
   mkdir -p "$legacy_pin"
+  query '.jobs.deploy-web.steps[] | select(.name == "Verify deploy kubeconfig identity and permissions") | .env.WEB_ORIGIN' >"$tmp/origin-env"
+  [[ "$(cat "$tmp/origin-env")" == '${{ needs.check-published-image-pin.outputs.origin }}' ]] ||
+    fail 'the deploy identity guard must receive the selected origin mode'
   query '.jobs.deploy-web.steps[] | select(.name == "Verify deploy kubeconfig identity and permissions") | .run' >"$tmp/guard.sh"
   [[ ! -e "$legacy_pin/.github/scripts/verify-deploy-identity.sh" ]] ||
     fail 'the legacy pin fixture must not contain the deploy identity guard script'
@@ -550,6 +577,27 @@ case "$*" in
       exit 1
     fi
     ;;
+  'auth can-i get services/teagram-web --subresource=proxy -n teagram')
+    proxy_access="${TEST_PROXY_ACCESS:-yes}"
+    printf '%s\n' "$proxy_access"
+    if [[ "$proxy_access" == no ]]; then
+      exit 1
+    fi
+    ;;
+  'auth can-i get pods -n teagram')
+    pod_read_access="${TEST_POD_READ_ACCESS:-no}"
+    printf '%s\n' "$pod_read_access"
+    if [[ "$pod_read_access" == no ]]; then
+      exit 1
+    fi
+    ;;
+  'auth can-i create pods --subresource=portforward -n teagram')
+    port_forward_access="${TEST_PORT_FORWARD_ACCESS:-no}"
+    printf '%s\n' "$port_forward_access"
+    if [[ "$port_forward_access" == no ]]; then
+      exit 1
+    fi
+    ;;
   *)
     echo "unexpected kubectl invocation: $*" >&2
     exit 2
@@ -559,12 +607,17 @@ SH
   chmod +x "$tmp/bin/kubectl"
 
   run_identity_guard() {
-    local output="$1" status
+    local output="$1" status web_origin=pages variable
     shift
+    for variable in "$@"; do
+      if [[ "$variable" == TEST_WEB_ORIGIN=* ]]; then
+        web_origin="${variable#TEST_WEB_ORIGIN=}"
+      fi
+    done
     : >"$tmp/calls"
     if (
       cd "$legacy_pin"
-      env PATH="$tmp/bin:$PATH" TEST_KUBECTL_LOG="$tmp/calls" "$@" \
+      env PATH="$tmp/bin:$PATH" TEST_KUBECTL_LOG="$tmp/calls" WEB_ORIGIN="$web_origin" "$@" \
         bash "$tmp/guard.sh" >"$output" 2>&1
     ); then
       return 0
@@ -575,16 +628,35 @@ SH
   }
 
   if ! run_identity_guard "$tmp/success.log" TEST_IDENTITY="$expected_identity" \
-    TEST_SECRET_ACCESS=no TEST_POD_ACCESS=no; then
+    TEST_SECRET_ACCESS=no TEST_POD_ACCESS=no TEST_PROXY_ACCESS=yes \
+    TEST_POD_READ_ACCESS=no TEST_PORT_FORWARD_ACCESS=no; then
     fail 'the deploy identity guard must accept the web identity with denied secret and pod access'
   fi
   cat >"$tmp/expected-calls" <<'EOF'
 auth whoami -o jsonpath={.status.userInfo.username}
 auth can-i get secrets -n teagram
 auth can-i create pods -n teagram
+auth can-i get services/teagram-web --subresource=proxy -n teagram
+auth can-i get pods -n teagram
+auth can-i create pods --subresource=portforward -n teagram
 EOF
   diff -u "$tmp/expected-calls" "$tmp/calls" >/dev/null ||
     fail 'the deploy identity guard must run each identity and permission check'
+
+  if ! run_identity_guard "$tmp/k3s-proxy-denied.log" TEST_WEB_ORIGIN=k3s \
+    TEST_IDENTITY="$expected_identity" TEST_SECRET_ACCESS=no TEST_POD_ACCESS=no TEST_PROXY_ACCESS=no \
+    TEST_POD_READ_ACCESS=no TEST_PORT_FORWARD_ACCESS=no; then
+    fail 'the default k3s deploy identity guard must pass when service proxy access is denied'
+  fi
+  cat >"$tmp/expected-k3s-calls" <<'EOF'
+auth whoami -o jsonpath={.status.userInfo.username}
+auth can-i get secrets -n teagram
+auth can-i create pods -n teagram
+auth can-i get pods -n teagram
+auth can-i create pods --subresource=portforward -n teagram
+EOF
+  diff -u "$tmp/expected-k3s-calls" "$tmp/calls" >/dev/null ||
+    fail 'the k3s deploy identity guard must not require service proxy access'
 
   if run_identity_guard "$tmp/whoami-failure.log" TEST_IDENTITY=unexpected; then
     fail 'the deploy identity guard accepted an unexpected kubeconfig identity'
@@ -621,6 +693,24 @@ EOF
   fi
   grep -Fq '::error::kubectl auth can-i create pods -n teagram failed' "$tmp/pods-command-error.log" ||
     fail 'a kubectl auth can-i pods error must name the failed check'
+
+  if run_identity_guard "$tmp/proxy-failure.log" TEST_WEB_ORIGIN=pages TEST_PROXY_ACCESS=no; then
+    fail 'the deploy identity guard accepted a denied service proxy permission'
+  fi
+  grep -Fq '::error::kubectl auth can-i get services/teagram-web --subresource=proxy -n teagram failed' "$tmp/proxy-failure.log" ||
+    fail 'a denied service proxy permission must name the failed check'
+
+  if run_identity_guard "$tmp/pod-read-failure.log" TEST_POD_READ_ACCESS=yes; then
+    fail 'the deploy identity guard accepted get pods access'
+  fi
+  grep -Fq '::error::kubectl auth can-i get pods -n teagram failed; expected no' "$tmp/pod-read-failure.log" ||
+    fail 'unexpected get pods access must name the failed check'
+
+  if run_identity_guard "$tmp/port-forward-failure.log" TEST_PORT_FORWARD_ACCESS=yes; then
+    fail 'the deploy identity guard accepted pod port-forward access'
+  fi
+  grep -Fq '::error::kubectl auth can-i create pods --subresource=portforward -n teagram failed; expected no' "$tmp/port-forward-failure.log" ||
+    fail 'unexpected pod port-forward access must name the failed check'
 )
 
 legacy_route_self_test() (
@@ -690,8 +780,8 @@ check_contract() {
     fail 'workflow_run must be limited to master'
   [[ "$(query '.permissions | to_entries | map(.key + "=" + .value) | sort | join(",")')" == 'actions=read,contents=read' ]] ||
     fail 'workflow permissions must be read-only actions and contents'
-  [[ "$(query '.jobs | keys | sort | join(",")')" == 'check-published-image-pin,deploy-web' ]] ||
-    fail 'workflow must define image-pin resolution and deployment jobs'
+  [[ "$(query '.jobs | keys | sort | join(",")')" == 'check-published-image-pin,deploy-pages,deploy-web' ]] ||
+    fail 'workflow must define image-pin resolution, fallback deployment, and Pages publication jobs'
   [[ "$(query '.jobs.check-published-image-pin.if')" == "$expected_if" ]] ||
     fail 'image-pin resolution must run only for master dispatches or successful push publications'
   [[ "$(query '.jobs.deploy-web.needs')" == check-published-image-pin ]] ||
@@ -708,16 +798,52 @@ check_contract() {
     fail 'image-pin resolution must expose its artifact name'
   [[ "$(query '.jobs.check-published-image-pin.outputs.image_digest')" == '${{ steps.target.outputs.image_digest }}' ]] ||
     fail 'image-pin resolution must expose its image digest'
-  [[ "$(query '.concurrency // {} | length')" == 0 ]] ||
-    fail 'workflow-level concurrency must not queue image-pin resolver jobs'
+  [[ "$(query '.jobs.check-published-image-pin.outputs.origin')" == '${{ steps.target.outputs.origin }}' ]] ||
+    fail 'image-pin resolution must expose the selected origin'
+  [[ "$(query '.concurrency.group')" == "$expected_concurrency_group" &&
+    "$(query '.concurrency."cancel-in-progress"')" == false ]] ||
+    fail 'only eligible deployments may share the origin serialization group'
+  local valid_publication_group failed_publication_group
+  deployment_group_for() {
+    local event_name="$1" ref="$2" conclusion="$3" workflow_event="$4" run_id="$5" attempt="$6"
+    if [[ ( "$event_name" == workflow_dispatch && "$ref" == refs/heads/master ) ||
+      ( "$event_name" == workflow_run && "$conclusion" == success && "$workflow_event" == push ) ]]; then
+      printf 'deploy-teagram-web\n'
+    else
+      printf 'deploy-teagram-web-ineligible-%s-%s\n' "$run_id" "$attempt"
+    fi
+  }
+  valid_publication_group="$(deployment_group_for workflow_run refs/heads/master success push 9000 1)"
+  failed_publication_group="$(deployment_group_for workflow_run refs/heads/master failure push 9001 1)"
+  [[ "$valid_publication_group" == deploy-teagram-web &&
+    "$failed_publication_group" != "$valid_publication_group" &&
+    "$failed_publication_group" != "$(deployment_group_for workflow_run refs/heads/master failure push 9002 1)" ]] ||
+    fail 'a failed publication must not replace a queued valid deployment'
   [[ "$(query '.jobs.check-published-image-pin.concurrency // {} | length')" == 0 ]] ||
-    fail 'image-pin resolution must happen before deployment concurrency'
-  [[ "$(query '.jobs.deploy-web.concurrency.group')" == deploy-teagram-web ]] ||
-    fail 'deployment concurrency group must remain deploy-teagram-web'
-  [[ "$(query '.jobs.deploy-web.concurrency."cancel-in-progress"')" == false ]] ||
-    fail 'deployment must not cancel a running rollout'
+    fail 'image-pin resolution must not define a separate concurrency group'
+  [[ "$(query '.jobs.deploy-web.concurrency // {} | length')" == 0 &&
+    "$(query '.jobs.deploy-pages.concurrency // {} | length')" == 0 ]] ||
+    fail 'origin deployment jobs must share workflow-level serialization'
   [[ "$(query '.jobs.deploy-web.environment')" == k3s-prod ]] ||
     fail 'deployment must use the k3s-prod environment'
+  [[ "$(query '.jobs.deploy-pages.needs | sort | join(",")')" == 'check-published-image-pin,deploy-web' &&
+    "$(query '.jobs.deploy-pages.if')" == "$expected_deploy_if" ]] ||
+    fail 'Pages publication must wait for the selected pin and current fallback deployment'
+  [[ "$(query '.jobs.deploy-web.outputs.sha')" == '${{ steps.refresh.outputs.sha }}' &&
+    "$(query '.jobs.deploy-web.outputs.run_id')" == '${{ steps.refresh.outputs.run_id }}' &&
+    "$(query '.jobs.deploy-web.outputs.artifact_name')" == '${{ steps.refresh.outputs.artifact_name }}' &&
+    "$(query '.jobs.deploy-web.outputs.image_digest')" == '${{ steps.refresh.outputs.image_digest }}' ]] ||
+    fail 'the fallback deployment must expose its refreshed image pin to Pages'
+  [[ "$(query '.jobs.deploy-pages.environment.name')" == github-pages ]] ||
+    fail 'Pages publication must use the github-pages environment'
+  [[ "$(query '.jobs.deploy-pages.permissions | to_entries | map(.key + "=" + .value) | sort | join(",")')" == 'actions=read,contents=read,id-token=write,pages=write' ]] ||
+    fail 'only the Pages job may request the Pages deployment and OIDC permissions'
+  [[ "$(query '[.jobs[] | select(.permissions.pages == "write")] | length')" == 1 &&
+    "$(query '[.jobs[] | select(.permissions."id-token" == "write")] | length')" == 1 ]] ||
+    fail 'Pages write and OIDC permissions must be scoped to the Pages job'
+  if query '.jobs.deploy-pages | tostring' | grep -Eiq 'k3s-prod|K3S_|tailscale|kubeconfig'; then
+    fail 'the Pages job must not access k3s environments, credentials, or tailnet configuration'
+  fi
   [[ "$(query '.jobs.check-published-image-pin.environment // ""')" == '' ]] ||
     fail 'image-pin resolution must not request production secrets'
   [[ "$(query '.jobs.deploy-web.permissions.actions')" == read &&
@@ -757,19 +883,23 @@ check_contract() {
   [[ "$identity_guard_run" == *'kubectl auth whoami'* &&
     "$identity_guard_run" == *'system:serviceaccount:teagram:teagram-web-deployer'* &&
     "$identity_guard_run" == *'kubectl auth can-i get secrets -n teagram'* &&
-    "$identity_guard_run" == *'kubectl auth can-i create pods -n teagram'* ]] ||
+    "$identity_guard_run" == *'kubectl auth can-i create pods -n teagram'* &&
+    "$identity_guard_run" == *'if [[ "$WEB_ORIGIN" == pages ]]'* &&
+    "$identity_guard_run" == *'kubectl auth can-i get services/teagram-web --subresource=proxy -n teagram'* &&
+    "$identity_guard_run" == *'kubectl auth can-i get pods -n teagram'* &&
+    "$identity_guard_run" == *'kubectl auth can-i create pods --subresource=portforward -n teagram'* ]] ||
     fail 'production must run the complete deploy identity and permission guard from the workflow revision'
   local kubeconfig_index tailnet_index identity_guard_index deploy_index step_name
   kubeconfig_index="$(query '.jobs.deploy-web.steps | to_entries | .[] | select(.value.name == "Install the deploy kubeconfig") | .key')"
   tailnet_index="$(query '.jobs.deploy-web.steps | to_entries | .[] | select(.value.name == "Join the tailnet") | .key')"
   identity_guard_index="$(query '.jobs.deploy-web.steps | to_entries | .[] | select(.value.name == "Verify deploy kubeconfig identity and permissions") | .key')"
-  deploy_index="$(query '.jobs.deploy-web.steps | to_entries | .[] | select(.value.name == "Deploy, verify the public route, and roll back on failure") | .key')"
+  deploy_index="$(query '.jobs.deploy-web.steps | to_entries | .[] | select(.value.name == "Deploy, verify the selected route, and roll back on failure") | .key')"
   [[ "$kubeconfig_index" =~ ^[0-9]+$ && "$tailnet_index" =~ ^[0-9]+$ &&
     "$identity_guard_index" =~ ^[0-9]+$ && "$deploy_index" =~ ^[0-9]+$ ]] ||
     fail 'deployment step indices must be present'
   (( kubeconfig_index < tailnet_index && tailnet_index < identity_guard_index && identity_guard_index < deploy_index )) ||
     fail 'the deploy kubeconfig identity guard must run before the first cluster write'
-  for step_name in 'Install the deploy kubeconfig' 'Join the tailnet' 'Verify deploy kubeconfig identity and permissions' 'Deploy, verify the public route, and roll back on failure'; do
+  for step_name in 'Install the deploy kubeconfig' 'Join the tailnet' 'Verify deploy kubeconfig identity and permissions' 'Deploy, verify the selected route, and roll back on failure'; do
     [[ "$(STEP_NAME="$step_name" query '[.jobs.deploy-web.steps[] | select(.name == strenv(STEP_NAME)) | has("if")][0]')" == false &&
       "$(STEP_NAME="$step_name" query '[.jobs.deploy-web.steps[] | select(.name == strenv(STEP_NAME)) | ."continue-on-error" // false][0]')" == false ]] ||
       fail "$step_name must stop on earlier failure"
@@ -778,13 +908,74 @@ check_contract() {
     fail 'the deploy kubeconfig must be removed after every deployment attempt'
 
   local deploy_run publisher_prefix target_run refresh_run
-  deploy_run="$(query '[.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the public route, and roll back on failure") | .run][0]')"
+  deploy_run="$(query '[.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the selected route, and roll back on failure") | .run][0]')"
   [[ "$deploy_run" == *'.github/scripts/deploy-k8s-web.sh'* ]] ||
     fail 'production must use the shared rollback-safe k3s deployment script'
-  [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the public route, and roll back on failure") | .env.REQUIRE_SINGLE_CLOUDFLARED][0]')" == true ]] ||
+  [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the selected route, and roll back on failure") | .env.REQUIRE_SINGLE_CLOUDFLARED][0]')" == true ]] ||
     fail 'production must require exactly one ready k3s tunnel connector'
-  [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the public route, and roll back on failure") | .env.SMOKE_URL][0]')" == 'https://web.teagram.io/' ]] ||
-    fail 'production smoke must verify the public web route'
+  [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the selected route, and roll back on failure") | .env.WEB_ORIGIN][0]')" == '${{ needs.check-published-image-pin.outputs.origin }}' &&
+    "$deploy_run" == *"smoke_url='http://127.0.0.1:18080/api/v1/namespaces/teagram/services/teagram-web/proxy/'"* &&
+    "$deploy_run" == *'verify_route=fallback'* &&
+    "$deploy_run" == *"smoke_url='https://web.teagram.io/'"* &&
+    "$deploy_run" == *'verify_label=rollout'* ]] ||
+    fail 'production smoke must verify the public origin in k3s mode and the API-proxied fallback in Pages mode'
+  grep -Fq 'kubectl proxy --address 127.0.0.1 --port 18080 --accept-hosts' .github/scripts/deploy-k8s-web.sh ||
+    fail 'Pages mode must serve the fallback through a loopback-only Kubernetes API proxy'
+  grep -Fq '"${smoke_url%/}/healthz?deploy=$deploy_sha"' .github/scripts/deploy-k8s-web.sh ||
+    fail 'Pages mode must probe the fallback service health route through the API proxy'
+
+  local pages_settings_run pages_pull_run pages_audit_run pages_prepare_run pages_archive_run pages_verify_run
+  pages_settings_run="$(query '[.jobs.deploy-pages.steps[] | select(.name == "Verify Pages settings and deployment policy") | .run][0]')"
+  pages_pull_run="$(query '[.jobs.deploy-pages.steps[] | select(.name == "Pull and extract the pinned image web root") | .run][0]')"
+  pages_audit_run="$(query '[.jobs.deploy-pages.steps[] | select(.name == "Verify the pinned web root against the audited artifact") | .run][0]')"
+  pages_prepare_run="$(query '[.jobs.deploy-pages.steps[] | select(.name == "Prepare the Pages site from the pinned image") | .run][0]')"
+  pages_archive_run="$(query '[.jobs.deploy-pages.steps[] | select(.name == "Verify hidden resources in the Pages archive") | .run][0]')"
+  pages_verify_run="$(query '[.jobs.deploy-pages.steps[] | select(.name == "Verify the selected public origin") | .run][0]')"
+  [[ "$pages_settings_run" == *'refs/heads/master'* &&
+    "$pages_settings_run" == *'.build_type == "workflow" and .cname == "web.teagram.io"'* &&
+    "$pages_settings_run" == *'.deployment_branch_policy.custom_branch_policies == true'* &&
+    "$pages_settings_run" == *'.branch_policies | length) == 1'* &&
+    "$pages_settings_run" == *'.branch_policies[0].name == "master"'* ]] ||
+    fail 'Pages must fail closed unless Actions publishing, the expected domain, and master-only deployment policy are configured'
+  [[ "$pages_pull_run" == *'docker pull --platform linux/amd64'* &&
+    "$pages_pull_run" == *'ghcr.io/teagramhq/teagram-web@sha256:$IMAGE_DIGEST'* &&
+    "$pages_pull_run" == *'org.opencontainers.image.revision'* &&
+    "$pages_pull_run" == *'com.teagram.private-artifact.digest'* &&
+    "$pages_pull_run" == *'docker cp "$container_id:/usr/share/nginx/html/."'* ]] ||
+    fail 'Pages must extract the web root from the selected audited image digest'
+  [[ "$pages_audit_run" == *'scripts/verify-deployment-artifact.mjs'* &&
+    "$pages_audit_run" == *'actual_digest'* &&
+    "$pages_audit_run" == *'actual_digest" == "$ARTIFACT_DIGEST"'* ]] ||
+    fail 'Pages must re-verify the image web root against the selected private artifact digest'
+  [[ "$pages_prepare_run" == *'.github/scripts/prepare-pages-site.mjs prepare'* &&
+    "$pages_prepare_run" == *'--source "$RUNNER_TEMP/pages-image-html"'* &&
+    "$pages_prepare_run" == *'--output "$RUNNER_TEMP/pages-site"'* &&
+    "$pages_prepare_run" == *'--commit "$DEPLOY_SHA"'* ]] ||
+    fail 'Pages must prepare the upload from the pinned image tree and source commit'
+  [[ "$pages_archive_run" == *'find "$RUNNER_TEMP/pages-site/.well-known" -type f'* &&
+    "$pages_archive_run" == *'tar -tf "$RUNNER_TEMP/artifact.tar"'* &&
+    "$pages_archive_run" == *'comm -23 "$expected" "$archived"'* &&
+    "$pages_archive_run" == *'./.well-known/teagram-web/source-commit.txt'* &&
+    "$pages_archive_run" == *'./.well-known/teagram-web/version.txt'* &&
+    "$pages_archive_run" == *'./.well-known/telegram-web/version.txt'* &&
+    "$pages_archive_run" == *'./404.html'* ]] ||
+    fail 'the Pages artifact contract must preserve allowed hidden resources, omit retired version paths, and include the app 404 page'
+  [[ "$(query '[.jobs.deploy-pages.steps[] | select(.uses // "" | test("^actions/upload-pages-artifact@"))] | length')" == 1 &&
+    "$(query '[.jobs.deploy-pages.steps[] | select(.uses // "" | test("^actions/deploy-pages@"))] | length')" == 1 &&
+    "$pages_verify_run" == *'.github/scripts/verify-pages-origin.mjs verify'* &&
+    "$pages_verify_run" == *'--origin "$WEB_ORIGIN"'* &&
+    "$pages_verify_run" == *'--commit "$DEPLOY_SHA"'* ]] ||
+    fail 'Pages must upload and verify the selected public origin after deployment'
+  local pages_settings_index pages_upload_index pages_deploy_index pages_verify_index
+  pages_settings_index="$(query '.jobs.deploy-pages.steps | to_entries | .[] | select(.value.name == "Verify Pages settings and deployment policy") | .key')"
+  pages_upload_index="$(query '.jobs.deploy-pages.steps | to_entries | .[] | select(.value.uses | test("^actions/upload-pages-artifact@")) | .key')"
+  pages_deploy_index="$(query '.jobs.deploy-pages.steps | to_entries | .[] | select(.value.name == "Deploy the Pages site") | .key')"
+  pages_verify_index="$(query '.jobs.deploy-pages.steps | to_entries | .[] | select(.value.name == "Verify the selected public origin") | .key')"
+  [[ "$pages_settings_index" =~ ^[0-9]+$ && "$pages_upload_index" =~ ^[0-9]+$ &&
+    "$pages_deploy_index" =~ ^[0-9]+$ && "$pages_verify_index" =~ ^[0-9]+$ ]] ||
+    fail 'Pages settings, upload, deployment, and origin verification steps must be present'
+  (( pages_settings_index < pages_upload_index && pages_upload_index < pages_deploy_index && pages_deploy_index < pages_verify_index )) ||
+    fail 'Pages settings must be verified before upload and the public origin after deployment'
   publisher_prefix="$(publisher_pin_prefix)"
   target_run="$(query '.jobs.check-published-image-pin.steps[] | select(.id == "target") | .run')"
   refresh_run="$(query '.jobs.deploy-web.steps[] | select(.id == "refresh") | .run')"
@@ -827,9 +1018,19 @@ self_test() {
     '.jobs.deploy-web.if = "wrong"'
     'del(.jobs.deploy-web.needs)'
     '.jobs.deploy-web.environment = "staging"'
+    '.concurrency.group = "wrong-deploy"'
+    '.concurrency.group = "deploy-teagram-web"'
+    '.concurrency."cancel-in-progress" = true'
     '.jobs.deploy-web.concurrency."cancel-in-progress" = true'
-    '(.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the public route, and roll back on failure") | .env.REQUIRE_SINGLE_CLOUDFLARED) = false'
-    '(.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the public route, and roll back on failure") | .env.SMOKE_URL) = "https://wrong.example/"'
+    '(.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the selected route, and roll back on failure") | .env.REQUIRE_SINGLE_CLOUDFLARED) = false'
+    '(.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the selected route, and roll back on failure") | .env.WEB_ORIGIN) = "wrong"'
+    'del(.jobs.deploy-pages)'
+    '.jobs.deploy-pages.needs = ["check-published-image-pin"]'
+    '.jobs.deploy-pages.environment.name = "production"'
+    '.jobs.deploy-pages.permissions.pages = "read"'
+    '.jobs.deploy-pages.permissions."id-token" = "read"'
+    '(.jobs.deploy-pages.steps[] | select(.name == "Verify Pages settings and deployment policy") | .run) = "echo missing policy"'
+    '(.jobs.deploy-pages.steps[] | select(.name == "Verify the selected public origin") | .run) = "echo missing origin verification"'
     '(.jobs.deploy-web.steps[] | select(.uses | test("^actions/checkout@")) | .with.ref) = "${{ github.event.workflow_run.head_sha }}"'
     '(.jobs.deploy-web.steps[] | select(.uses | test("^actions/download-artifact@")) | .with."run-id") = "${{ github.run_id }}"'
     'del(.jobs.deploy-web.steps[] | select(.name == "Install the deploy kubeconfig").env.KUBECONFIG_CONTENT)'
@@ -839,7 +1040,7 @@ self_test() {
     '(.jobs.deploy-web.steps[] | select(.name == "Join the tailnet") | ."continue-on-error") = true'
     '(.jobs.deploy-web.steps[] | select(.name == "Verify deploy kubeconfig identity and permissions") | .if) = false'
     'del(.jobs.deploy-web.steps[] | select(.name == "Verify deploy kubeconfig identity and permissions"))'
-    '(.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the public route, and roll back on failure") | .if) = "always()"'
+    '(.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the selected route, and roll back on failure") | .if) = "always()"'
     '.permissions.contents = "write"'
   )
 
