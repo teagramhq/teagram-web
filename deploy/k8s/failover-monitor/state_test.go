@@ -196,6 +196,7 @@ func TestControllerRestartWithMissingStateKeepsWritesLocked(t *testing.T) {
 	configMapExists := false
 	initializationMarkerExists := false
 	stateConfigMapCreates := 0
+	stateDataKeyPresent := true
 	stateJSON := ""
 	resourceVersion := 7
 	var warningEvents []struct {
@@ -220,9 +221,13 @@ func TestControllerRestartWithMissingStateKeepsWritesLocked(t *testing.T) {
 				http.NotFound(response, request)
 				return
 			}
+			data := map[string]string{}
+			if stateDataKeyPresent {
+				data[stateDataKey] = stateJSON
+			}
 			_ = json.NewEncoder(response).Encode(map[string]any{
 				"metadata": map[string]string{"resourceVersion": strconv.Itoa(resourceVersion)},
-				"data":     map[string]string{stateDataKey: stateJSON},
+				"data":     data,
 			})
 		case request.Method == http.MethodPost && request.URL.Path == "/api/v1/namespaces/"+monitorNamespace+"/configmaps":
 			var resource struct {
@@ -246,6 +251,7 @@ func TestControllerRestartWithMissingStateKeepsWritesLocked(t *testing.T) {
 					return
 				}
 				stateJSON = resource.Data[stateDataKey]
+				stateDataKeyPresent = true
 				configMapExists = true
 				stateConfigMapCreates++
 				resourceVersion++
@@ -265,6 +271,7 @@ func TestControllerRestartWithMissingStateKeepsWritesLocked(t *testing.T) {
 				t.Errorf("state ConfigMap patch body was invalid: %v", err)
 			}
 			stateJSON = patch.Data[stateDataKey]
+			stateDataKeyPresent = true
 			resourceVersion++
 			_ = json.NewEncoder(response).Encode(map[string]any{
 				"metadata": map[string]string{"resourceVersion": strconv.Itoa(resourceVersion)},
@@ -328,6 +335,44 @@ func TestControllerRestartWithMissingStateKeepsWritesLocked(t *testing.T) {
 		t.Fatal(err)
 	}
 	stateJSON = string(persistedState)
+	var historicalState PersistentState
+	if err := json.Unmarshal(persistedState, &historicalState); err != nil {
+		t.Fatal(err)
+	}
+	if len(historicalState.Changes) != maxChanges {
+		t.Fatalf("test did not prepare a full change history: %#v", historicalState.Changes)
+	}
+	stateDataKeyPresent = false
+	missingStateDataStore := &KubernetesStateStore{
+		endpoint:  server.URL,
+		tokenPath: tokenPath,
+		podName:   "monitor-test-missing-state-data",
+		podUID:    "pod-uid-missing-state-data",
+		client:    server.Client(),
+	}
+	missingStateDataController, err := NewController(
+		context.Background(), config,
+		&mutableRecordClient{record: testRecord(config, config.PagesTarget)},
+		missingStateDataStore,
+		log.New(&logs, "", 0),
+		NewMetrics(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !missingStateDataController.SafetyLocked() {
+		t.Fatal("initialized state with a missing state.json key must keep DNS writes locked")
+	}
+	if !configMapExists || stateDataKeyPresent || stateConfigMapCreates != 1 {
+		t.Fatalf("missing state data was recreated or lost its ConfigMap: configmap=%t data-key=%t creates=%d", configMapExists, stateDataKeyPresent, stateConfigMapCreates)
+	}
+	if len(warningEvents) != 2 || warningEvents[1].Type != "Warning" || warningEvents[1].Reason != "StateConfigmapLost" {
+		t.Fatalf("missing state.json events = %#v, want one StateConfigmapLost Warning Event", warningEvents)
+	}
+	if strings.Count(logs.String(), "event=state_configmap_lost") != 1 {
+		t.Fatalf("missing state.json data loss was not logged: %s", logs.String())
+	}
+
 	configMapExists = false
 	restartedStore := &KubernetesStateStore{
 		endpoint:  server.URL,
@@ -352,13 +397,13 @@ func TestControllerRestartWithMissingStateKeepsWritesLocked(t *testing.T) {
 	if configMapExists || stateConfigMapCreates != 1 {
 		t.Fatalf("state-loss recovery recreated an empty ConfigMap: state=%t creates=%d", configMapExists, stateConfigMapCreates)
 	}
-	if len(warningEvents) != 2 || warningEvents[1].Type != "Warning" || warningEvents[1].Reason != "StateConfigmapLost" {
-		t.Fatalf("missing initialized state events = %#v, want one StateConfigmapLost Warning Event", warningEvents)
+	if len(warningEvents) != 3 || warningEvents[2].Type != "Warning" || warningEvents[2].Reason != "StateConfigmapLost" {
+		t.Fatalf("missing initialized state events = %#v, want a StateConfigmapLost Warning Event", warningEvents)
 	}
-	if !strings.Contains(warningEvents[1].Message, "change history") || !strings.Contains(warningEvents[1].Message, "record writes are disabled") {
-		t.Fatalf("state-loss Warning Event omitted the lost history or write lock: %#v", warningEvents[1])
+	if !strings.Contains(warningEvents[2].Message, "change history") || !strings.Contains(warningEvents[2].Message, "record writes are disabled") {
+		t.Fatalf("state-loss Warning Event omitted the lost history or write lock: %#v", warningEvents[2])
 	}
-	if strings.Count(logs.String(), "event=state_configmap_lost") != 1 {
+	if strings.Count(logs.String(), "event=state_configmap_lost") != 2 {
 		t.Fatalf("state loss was not logged: %s", logs.String())
 	}
 }

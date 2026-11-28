@@ -27,6 +27,7 @@ const (
 var (
 	errStateConfigMapAlreadyExists            = errors.New("state ConfigMap already exists")
 	errStateInitializationMarkerAlreadyExists = errors.New("state initialization marker already exists")
+	errStateDataMissing                       = errors.New("state data is missing")
 )
 
 type stateLoadStatus uint8
@@ -47,6 +48,8 @@ type PendingTransition struct {
 	From string    `json:"from"`
 	To   string    `json:"to"`
 	At   time.Time `json:"at"`
+	// PatchVerified is persisted only after Cloudflare confirms the requested target.
+	PatchVerified bool `json:"patchVerified,omitempty"`
 }
 
 type StateStore interface {
@@ -209,21 +212,30 @@ func (store *KubernetesStateStore) Load(ctx context.Context) (PersistentState, s
 				return PersistentState{}, stateLoadExisting, err
 			}
 			state, err := store.decodeStateConfigMap(created)
+			if errors.Is(err, errStateDataMissing) {
+				return PersistentState{}, stateLoadLost, nil
+			}
+			if err != nil {
+				return PersistentState{}, stateLoadExisting, err
+			}
 			if markerErr := store.ensureStateInitializationMarker(ctx); markerErr != nil {
 				return state, stateLoadInitialized, markerErr
 			}
-			return state, stateLoadInitialized, err
+			return state, stateLoadInitialized, nil
 		}
 		if response.StatusCode < 200 || response.StatusCode > 299 {
 			response.Body.Close()
 			return PersistentState{}, stateLoadExisting, fmt.Errorf("Kubernetes state request returned HTTP status %d", response.StatusCode)
 		}
 		state, stateErr := store.decodeStateConfigMap(response)
-		if err := store.ensureStateInitializationMarker(ctx); err != nil {
-			return state, stateLoadExisting, err
+		if errors.Is(stateErr, errStateDataMissing) {
+			return PersistentState{}, stateLoadLost, nil
 		}
 		if stateErr != nil {
 			return state, stateLoadExisting, stateErr
+		}
+		if err := store.ensureStateInitializationMarker(ctx); err != nil {
+			return state, stateLoadExisting, err
 		}
 		return state, stateLoadExisting, nil
 	}
@@ -376,9 +388,9 @@ func (store *KubernetesStateStore) decodeStateConfigMap(response *http.Response)
 		return PersistentState{}, fmt.Errorf("Kubernetes state resource version was missing")
 	}
 	store.resourceVersion = configMap.Metadata.ResourceVersion
-	stateJSON := configMap.Data[stateDataKey]
-	if stateJSON == "" {
-		return PersistentState{}, nil
+	stateJSON, ok := configMap.Data[stateDataKey]
+	if !ok || stateJSON == "" {
+		return PersistentState{}, errStateDataMissing
 	}
 	var state PersistentState
 	if err := json.Unmarshal([]byte(stateJSON), &state); err != nil {

@@ -99,7 +99,7 @@ func (controller *Controller) validateRecordState(ctx context.Context) bool {
 		controller.alertEvery("state_configmap_initialized", "persistent state ConfigMap was initialized for first use")
 	case stateLoadLost:
 		controller.recordSafe = false
-		controller.alert("state_configmap_lost", "previously initialized state ConfigMap is missing; change history or a pending transition may have been lost; record writes are disabled")
+		controller.alert("state_configmap_lost", "state ConfigMap or its state.json data is missing; change history or a pending transition may have been lost; record writes are disabled")
 		return false
 	}
 	if err != nil {
@@ -124,9 +124,18 @@ func (controller *Controller) validateRecordState(ctx context.Context) bool {
 			controller.alert("record_drift", "Cloudflare record changed outside the monitor; record writes are disabled")
 			return false
 		}
-		if currentTarget == to {
+		if state.Pending.PatchVerified {
+			if currentTarget != to {
+				controller.recordSafe = false
+				controller.alert("record_drift", "Cloudflare record changed outside the monitor; record writes are disabled")
+				return false
+			}
 			state.Target = to
 			state.Changes = append(state.Changes, state.Pending.At)
+		} else if currentTarget == to {
+			controller.recordSafe = false
+			controller.alert("pending_state_unsubmitted", "DNS target matches a transition without a verified PATCH; record writes are disabled")
+			return false
 		}
 		state.Pending = nil
 		if err := controller.stateStore.Save(ctx, state); err != nil {
@@ -183,8 +192,8 @@ func (controller *Controller) clearValidationAlerts() bool {
 		"state_reconcile_failed", "pending_state_invalid", "record_drift", "change_cap_state_invalid",
 		"record_read_before_write_failed", "record_invalid_before_write", "record_drift_before_write",
 		"record_read_after_intent_failed", "record_invalid_after_intent", "record_drift_after_intent",
-		"state_pending_cancel_failed",
-		"state_pending_failed", "record_patch_unverified", "state_write_failed",
+		"state_pending_cancel_failed", "pending_state_unsubmitted",
+		"state_pending_failed", "state_pending_verify_failed", "record_patch_unverified", "state_write_failed",
 		"record_write_blocked",
 	} {
 		if controller.alerts[key] {
@@ -347,6 +356,15 @@ func (controller *Controller) switchTo(ctx context.Context, target, reason strin
 	if err != nil || updatedTarget != target {
 		controller.recordSafe = false
 		controller.alert("record_patch_unverified", "DNS record update response did not match the requested safe target")
+		return
+	}
+	verifiedPending := *pendingState.Pending
+	verifiedPending.PatchVerified = true
+	verifiedState := pendingState
+	verifiedState.Pending = &verifiedPending
+	if err := controller.stateStore.Save(ctx, verifiedState); err != nil {
+		controller.recordSafe = false
+		controller.alert("state_pending_verify_failed", messageWithSafeCause("DNS changed but its verified transition could not be persisted; future writes are disabled", err))
 		return
 	}
 	if controller.clearAlert("record_patch_failed") {

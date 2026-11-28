@@ -416,7 +416,7 @@ func TestPendingTransitionReconcilesAfterFinalStateSaveFailure(t *testing.T) {
 	config.InitialTarget = config.TunnelTarget
 	state := &memoryStateStore{
 		state:      PersistentState{Target: config.TunnelTarget},
-		saveErrors: []error{nil, errors.New("simulated final state save failure")},
+		saveErrors: []error{nil, nil, errors.New("simulated final state save failure")},
 	}
 	client := &mutableRecordClient{record: testRecord(config, config.TunnelTarget)}
 	var logs bytes.Buffer
@@ -435,6 +435,9 @@ func TestPendingTransitionReconcilesAfterFinalStateSaveFailure(t *testing.T) {
 	}
 	if state.state.Pending == nil || state.state.Pending.To != config.PagesTarget {
 		t.Fatalf("failed final state save lost its pending transition: %#v", state.state)
+	}
+	if !state.state.Pending.PatchVerified {
+		t.Fatalf("failed final state save lost the verified PATCH marker: %#v", state.state.Pending)
 	}
 
 	restarted, err := NewController(context.Background(), config, client, state, log.New(&logs, "", 0), NewMetrics())
@@ -505,6 +508,52 @@ func TestDNSWriteRevalidatesRecordAfterSavingPendingState(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "event=record_drift_after_intent") {
 		t.Fatalf("post-intent record drift was not reported: %s", logs.String())
+	}
+}
+
+func TestUnsubmittedPendingIntentCannotUnlockAfterCancelSaveFailure(t *testing.T) {
+	config := testConfig()
+	config.WritesEnabled = true
+	state := &memoryStateStore{
+		state:      PersistentState{Target: config.PagesTarget},
+		saveErrors: []error{nil, errors.New("simulated pending cancellation save failure")},
+	}
+	client := &mutableRecordClient{record: testRecord(config, config.PagesTarget)}
+	state.saveHook = func(saved PersistentState) {
+		if saved.Pending != nil {
+			client.record.Content = config.TunnelTarget
+		}
+	}
+	var logs bytes.Buffer
+	controller, err := NewController(context.Background(), config, client, state, log.New(&logs, "", 0), NewMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	for attempt := 0; attempt < 3; attempt++ {
+		controller.observe(context.Background(), start.Add(time.Duration(attempt)*probeInterval), errors.New("probe failed"))
+	}
+	if len(client.patched) != 0 || state.state.Pending == nil {
+		t.Fatalf("drifted record was patched or cancellation failure lost the pending intent: patches=%v state=%#v", client.patched, state.state)
+	}
+	if !controller.SafetyLocked() {
+		t.Fatal("cancellation save failure did not lock writes")
+	}
+
+	controller.retryRecordValidation(context.Background())
+	if !controller.SafetyLocked() || state.state.Pending == nil || len(client.patched) != 0 {
+		t.Fatalf("revalidation trusted an unsubmitted pending transition: locked=%t state=%#v patches=%v logs=%s", controller.SafetyLocked(), state.state, client.patched, logs.String())
+	}
+
+	restarted, err := NewController(context.Background(), config, client, state, log.New(&logs, "", 0), NewMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !restarted.SafetyLocked() || state.state.Pending == nil {
+		t.Fatalf("restart trusted an unsubmitted pending transition: locked=%t state=%#v logs=%s", restarted.SafetyLocked(), state.state, logs.String())
+	}
+	if !strings.Contains(logs.String(), "event=pending_state_unsubmitted") {
+		t.Fatalf("unsubmitted pending transition was not reported: %s", logs.String())
 	}
 }
 
