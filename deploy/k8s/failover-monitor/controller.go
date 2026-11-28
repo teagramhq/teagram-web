@@ -93,12 +93,14 @@ func (controller *Controller) validateRecordState(ctx context.Context) bool {
 		return false
 	}
 
-	state, recreated, err := controller.stateStore.Load(ctx)
-	if recreated {
-		controller.alertEvery(
-			"state_configmap_recreated",
-			"persistent state ConfigMap was missing and recreated; recent DNS change history or a pending transition may have been lost",
-		)
+	state, loadStatus, err := controller.stateStore.Load(ctx)
+	switch loadStatus {
+	case stateLoadInitialized:
+		controller.alertEvery("state_configmap_initialized", "persistent state ConfigMap was initialized for first use")
+	case stateLoadLost:
+		controller.recordSafe = false
+		controller.alert("state_configmap_lost", "previously initialized state ConfigMap is missing; change history or a pending transition may have been lost; record writes are disabled")
+		return false
 	}
 	if err != nil {
 		controller.recordSafe = false
@@ -177,9 +179,11 @@ func (controller *Controller) retryRecordValidation(ctx context.Context) {
 func (controller *Controller) clearValidationAlerts() bool {
 	cleared := false
 	for _, key := range []string{
-		"record_read_failed", "record_invalid", "state_read_failed", "state_initialize_failed",
+		"record_read_failed", "record_invalid", "state_read_failed", "state_initialize_failed", "state_configmap_lost",
 		"state_reconcile_failed", "pending_state_invalid", "record_drift", "change_cap_state_invalid",
 		"record_read_before_write_failed", "record_invalid_before_write", "record_drift_before_write",
+		"record_read_after_intent_failed", "record_invalid_after_intent", "record_drift_after_intent",
+		"state_pending_cancel_failed",
 		"state_pending_failed", "record_patch_unverified", "state_write_failed",
 		"record_write_blocked",
 	} {
@@ -306,6 +310,32 @@ func (controller *Controller) switchTo(ctx context.Context, target, reason strin
 		controller.alert("state_pending_failed", messageWithSafeCause("DNS update was not attempted because its pending transition could not be saved", err))
 		return
 	}
+	intentCheckRecord, err := controller.recordClient.GetRecord(ctx)
+	if err != nil {
+		controller.cancelPendingTransition(
+			ctx,
+			"record_read_after_intent_failed",
+			messageWithSafeCause("record write was refused because the DNS record could not be revalidated after saving its transition intent", err),
+		)
+		return
+	}
+	intentCheckTarget, err := validateRecord(intentCheckRecord, controller.config)
+	if err != nil {
+		controller.cancelPendingTransition(
+			ctx,
+			"record_invalid_after_intent",
+			"record write was refused because the DNS record changed after saving its transition intent",
+		)
+		return
+	}
+	if intentCheckTarget != controller.target {
+		controller.cancelPendingTransition(
+			ctx,
+			"record_drift_after_intent",
+			"record write was refused because the DNS target changed after saving its transition intent",
+		)
+		return
+	}
 
 	updatedRecord, err := controller.recordClient.PatchTarget(ctx, target)
 	if err != nil {
@@ -341,6 +371,15 @@ func (controller *Controller) switchTo(ctx context.Context, target, reason strin
 	if len(recentChanges(controller.history, now)) >= maxChanges && target == normalizedTunnelTarget(controller.config) {
 		controller.alert("change_cap_exhausted", "DNS change cap reached; holding the tunnel target")
 	}
+}
+
+func (controller *Controller) cancelPendingTransition(ctx context.Context, key, message string) {
+	controller.recordSafe = false
+	state := PersistentState{Target: controller.target, Changes: controller.history}
+	if err := controller.stateStore.Save(ctx, state); err != nil {
+		controller.alert("state_pending_cancel_failed", messageWithSafeCause("unsubmitted DNS transition could not be canceled; record writes are disabled", err))
+	}
+	controller.alert(key, message)
 }
 
 func (controller *Controller) alert(key, message string) {

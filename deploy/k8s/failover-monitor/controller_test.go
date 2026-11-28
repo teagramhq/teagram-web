@@ -249,8 +249,8 @@ func TestWriteReadsAndPersistsTheSingleAllowedRecord(t *testing.T) {
 	if len(client.patched) != 1 || client.patched[0] != config.TunnelTarget {
 		t.Fatalf("record updates = %#v, want only the tunnel target", client.patched)
 	}
-	if client.getCalls != 2 {
-		t.Fatalf("record reads = %d, want startup and pre-write reads", client.getCalls)
+	if client.getCalls != 3 {
+		t.Fatalf("record reads = %d, want startup, pre-write, and post-intent reads", client.getCalls)
 	}
 	if state.state.Target != config.TunnelTarget || len(state.state.Changes) != 1 {
 		t.Fatalf("persisted switch state = %#v, want tunnel target and one change", state.state)
@@ -280,7 +280,11 @@ func TestRecordFailureAlertsIncludeOnlySafeCause(t *testing.T) {
 
 	state := &memoryStateStore{state: PersistentState{Target: config.PagesTarget}}
 	client := &fakeRecordClient{
-		records:  []DNSRecord{testRecord(config, config.PagesTarget), testRecord(config, config.PagesTarget)},
+		records: []DNSRecord{
+			testRecord(config, config.PagesTarget),
+			testRecord(config, config.PagesTarget),
+			testRecord(config, config.PagesTarget),
+		},
 		patchErr: fmt.Errorf("private API detail: %w", context.DeadlineExceeded),
 	}
 	var patchLogs bytes.Buffer
@@ -469,6 +473,41 @@ func TestDNSWriteRequiresPendingStateToBeSaved(t *testing.T) {
 	}
 }
 
+func TestDNSWriteRevalidatesRecordAfterSavingPendingState(t *testing.T) {
+	config := testConfig()
+	config.WritesEnabled = true
+	client := &mutableRecordClient{record: testRecord(config, config.PagesTarget)}
+	state := &memoryStateStore{
+		state: PersistentState{Target: config.PagesTarget},
+		saveHook: func(saved PersistentState) {
+			if saved.Pending != nil {
+				client.record.Content = config.TunnelTarget
+			}
+		},
+	}
+	var logs bytes.Buffer
+	controller, err := NewController(context.Background(), config, client, state, log.New(&logs, "", 0), NewMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	for attempt := 0; attempt < 3; attempt++ {
+		controller.observe(context.Background(), start.Add(time.Duration(attempt)*probeInterval), errors.New("probe failed"))
+	}
+	if len(client.patched) != 0 {
+		t.Fatalf("Cloudflare patch was submitted after the record changed during intent save: %v", client.patched)
+	}
+	if state.state.Pending != nil || state.state.Target != config.PagesTarget || len(state.state.Changes) != 0 {
+		t.Fatalf("unsubmitted transition was not canceled: %#v", state.state)
+	}
+	if !controller.SafetyLocked() || client.getCalls != 3 {
+		t.Fatalf("drift was not revalidated and locked: safetyLocked=%t recordReads=%d", controller.SafetyLocked(), client.getCalls)
+	}
+	if !strings.Contains(logs.String(), "event=record_drift_after_intent") {
+		t.Fatalf("post-intent record drift was not reported: %s", logs.String())
+	}
+}
+
 func testRecord(config Config, target string) DNSRecord {
 	return DNSRecord{
 		ID:      config.RecordID,
@@ -518,6 +557,7 @@ type memoryStateStore struct {
 	state      PersistentState
 	loadErrors []error
 	saveErrors []error
+	saveHook   func(PersistentState)
 }
 
 type mutableRecordClient struct {
@@ -565,15 +605,15 @@ func (sink *recordingAlertSink) count(key string) int {
 	return count
 }
 
-func (store *memoryStateStore) Load(context.Context) (PersistentState, bool, error) {
+func (store *memoryStateStore) Load(context.Context) (PersistentState, stateLoadStatus, error) {
 	if len(store.loadErrors) != 0 {
 		err := store.loadErrors[0]
 		store.loadErrors = store.loadErrors[1:]
 		if err != nil {
-			return PersistentState{}, false, err
+			return PersistentState{}, stateLoadExisting, err
 		}
 	}
-	return store.state, false, nil
+	return store.state, stateLoadExisting, nil
 }
 
 func (store *memoryStateStore) Save(_ context.Context, state PersistentState) error {
@@ -585,5 +625,8 @@ func (store *memoryStateStore) Save(_ context.Context, state PersistentState) er
 		}
 	}
 	store.state = state
+	if store.saveHook != nil {
+		store.saveHook(state)
+	}
 	return nil
 }

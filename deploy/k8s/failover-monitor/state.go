@@ -18,11 +18,24 @@ import (
 )
 
 const (
-	stateDataKey            = "state.json"
-	serviceAccountTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	stateDataKey = "state.json"
+	// This separate ConfigMap persists if the mutable runtime state is lost.
+	stateInitializationMarker = "web-failover-state-initialized"
+	serviceAccountTokenPath   = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 )
 
-var errStateConfigMapAlreadyExists = errors.New("state ConfigMap already exists")
+var (
+	errStateConfigMapAlreadyExists            = errors.New("state ConfigMap already exists")
+	errStateInitializationMarkerAlreadyExists = errors.New("state initialization marker already exists")
+)
+
+type stateLoadStatus uint8
+
+const (
+	stateLoadExisting stateLoadStatus = iota
+	stateLoadInitialized
+	stateLoadLost
+)
 
 type PersistentState struct {
 	Target  string             `json:"target"`
@@ -37,17 +50,18 @@ type PendingTransition struct {
 }
 
 type StateStore interface {
-	Load(context.Context) (state PersistentState, recreated bool, err error)
+	Load(context.Context) (state PersistentState, status stateLoadStatus, err error)
 	Save(context.Context, PersistentState) error
 }
 
 type KubernetesStateStore struct {
-	endpoint        string
-	tokenPath       string
-	podName         string
-	podUID          string
-	resourceVersion string
-	client          *http.Client
+	endpoint                    string
+	tokenPath                   string
+	podName                     string
+	podUID                      string
+	resourceVersion             string
+	initializationMarkerEnsured bool
+	client                      *http.Client
 }
 
 func NewKubernetesStateStore() (*KubernetesStateStore, error) {
@@ -165,39 +179,111 @@ func (store *KubernetesStateStore) PublishWarning(ctx context.Context, key, mess
 	return nil
 }
 
-func (store *KubernetesStateStore) Load(ctx context.Context) (PersistentState, bool, error) {
+func (store *KubernetesStateStore) Load(ctx context.Context) (PersistentState, stateLoadStatus, error) {
+	initializationMarkerExists := false
 	for attempt := 0; attempt < 3; attempt++ {
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, store.endpoint+statePath(), nil)
 		if err != nil {
-			return PersistentState{}, false, fmt.Errorf("could not construct state request")
+			return PersistentState{}, stateLoadExisting, fmt.Errorf("could not construct state request")
 		}
 		if err := store.authorize(request); err != nil {
-			return PersistentState{}, false, err
+			return PersistentState{}, stateLoadExisting, err
 		}
 		response, err := store.client.Do(request)
 		if err != nil {
-			return PersistentState{}, false, fmt.Errorf("Kubernetes state request failed: %w", err)
+			return PersistentState{}, stateLoadExisting, fmt.Errorf("Kubernetes state request failed: %w", err)
 		}
 		if response.StatusCode == http.StatusNotFound {
 			response.Body.Close()
+			markerCreated, err := store.ensureStateInitializationMarker(ctx)
+			if err != nil {
+				return PersistentState{}, stateLoadExisting, err
+			}
+			if !markerCreated {
+				initializationMarkerExists = true
+				continue
+			}
 			created, err := store.createStateConfigMap(ctx)
 			if errors.Is(err, errStateConfigMapAlreadyExists) {
 				continue
 			}
 			if err != nil {
-				return PersistentState{}, false, err
+				return PersistentState{}, stateLoadExisting, err
 			}
 			state, err := store.decodeStateConfigMap(created)
-			return state, true, err
+			return state, stateLoadInitialized, err
 		}
 		if response.StatusCode < 200 || response.StatusCode > 299 {
 			response.Body.Close()
-			return PersistentState{}, false, fmt.Errorf("Kubernetes state request returned HTTP status %d", response.StatusCode)
+			return PersistentState{}, stateLoadExisting, fmt.Errorf("Kubernetes state request returned HTTP status %d", response.StatusCode)
 		}
-		state, err := store.decodeStateConfigMap(response)
-		return state, false, err
+		state, stateErr := store.decodeStateConfigMap(response)
+		if _, err := store.ensureStateInitializationMarker(ctx); err != nil {
+			return state, stateLoadExisting, err
+		}
+		if stateErr != nil {
+			return state, stateLoadExisting, stateErr
+		}
+		return state, stateLoadExisting, nil
 	}
-	return PersistentState{}, false, fmt.Errorf("state ConfigMap creation conflicted repeatedly")
+	if initializationMarkerExists {
+		return PersistentState{}, stateLoadLost, nil
+	}
+	return PersistentState{}, stateLoadExisting, fmt.Errorf("state ConfigMap creation conflicted repeatedly")
+}
+
+func (store *KubernetesStateStore) ensureStateInitializationMarker(ctx context.Context) (bool, error) {
+	if store.initializationMarkerEnsured {
+		return false, nil
+	}
+	err := store.createStateInitializationMarker(ctx)
+	if errors.Is(err, errStateInitializationMarkerAlreadyExists) {
+		store.initializationMarkerEnsured = true
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	store.initializationMarkerEnsured = true
+	return true, nil
+}
+
+func (store *KubernetesStateStore) createStateInitializationMarker(ctx context.Context) error {
+	body, err := json.Marshal(struct {
+		APIVersion string            `json:"apiVersion"`
+		Kind       string            `json:"kind"`
+		Metadata   map[string]string `json:"metadata"`
+		Data       map[string]string `json:"data"`
+	}{
+		APIVersion: "v1",
+		Kind:       "ConfigMap",
+		Metadata:   map[string]string{"name": stateInitializationMarker, "namespace": monitorNamespace},
+		Data:       map[string]string{"initialized": "true"},
+	})
+	if err != nil {
+		return fmt.Errorf("could not encode state initialization marker")
+	}
+	endpoint := store.endpoint + "/api/v1/namespaces/" + url.PathEscape(monitorNamespace) + "/configmaps"
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
+	if err != nil {
+		return fmt.Errorf("could not construct state initialization marker request")
+	}
+	if err := store.authorize(request); err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := store.client.Do(request)
+	if err != nil {
+		return fmt.Errorf("Kubernetes state initialization marker request failed: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusConflict {
+		return errStateInitializationMarkerAlreadyExists
+	}
+	if response.StatusCode < 200 || response.StatusCode > 299 {
+		return fmt.Errorf("Kubernetes state initialization marker returned HTTP status %d", response.StatusCode)
+	}
+	return nil
 }
 
 func (store *KubernetesStateStore) createStateConfigMap(ctx context.Context) (*http.Response, error) {

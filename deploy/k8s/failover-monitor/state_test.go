@@ -12,11 +12,13 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestStateStoreCreatesMissingRuntimeConfigMap(t *testing.T) {
 	tokenPath := writeProjectedTestToken(t, "state-token")
 	var created bool
+	var markerCreated bool
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("Authorization") != "Bearer state-token" {
 			t.Error("state request did not use the projected token")
@@ -30,9 +32,20 @@ func TestStateStoreCreatesMissingRuntimeConfigMap(t *testing.T) {
 				Data     map[string]string `json:"data"`
 			}
 			if err := json.NewDecoder(request.Body).Decode(&resource); err != nil {
-				t.Errorf("state ConfigMap create body was invalid: %v", err)
+				t.Errorf("ConfigMap create body was invalid: %v", err)
 			}
-			if resource.Metadata["name"] != stateConfigMap || resource.Metadata["namespace"] != monitorNamespace {
+			if resource.Metadata["namespace"] != monitorNamespace {
+				t.Errorf("created ConfigMap namespace = %#v", resource.Metadata)
+			}
+			if resource.Metadata["name"] == stateInitializationMarker {
+				if resource.Data["initialized"] != "true" {
+					t.Errorf("created initialization marker = %#v", resource.Data)
+				}
+				markerCreated = true
+				response.WriteHeader(http.StatusCreated)
+				return
+			}
+			if resource.Metadata["name"] != stateConfigMap {
 				t.Errorf("created ConfigMap metadata = %#v", resource.Metadata)
 			}
 			if resource.Data[stateDataKey] != `{"target":"","changes":[]}` {
@@ -49,20 +62,22 @@ func TestStateStoreCreatesMissingRuntimeConfigMap(t *testing.T) {
 	defer server.Close()
 
 	store := &KubernetesStateStore{endpoint: server.URL, tokenPath: tokenPath, client: server.Client()}
-	state, recreated, err := store.Load(context.Background())
+	state, status, err := store.Load(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !created || !recreated || state.Target != "" || store.resourceVersion != "7" {
-		t.Fatalf("Load did not report initialized runtime state: created=%t recreated=%t state=%#v version=%q", created, recreated, state, store.resourceVersion)
+	if !markerCreated || !created || status != stateLoadInitialized || state.Target != "" || store.resourceVersion != "7" {
+		t.Fatalf("Load did not report initialized runtime state: marker=%t created=%t status=%d state=%#v version=%q", markerCreated, created, status, state, store.resourceVersion)
 	}
 }
 
-func TestControllerAlertsOnEveryStateConfigMapRecreation(t *testing.T) {
+func TestControllerRestartWithMissingStateKeepsWritesLocked(t *testing.T) {
 	tokenPath := writeProjectedTestToken(t, "state-token")
 	config := testConfig()
 	config.WritesEnabled = true
 	configMapExists := false
+	initializationMarkerExists := false
+	stateConfigMapCreates := 0
 	stateJSON := ""
 	resourceVersion := 7
 	var warningEvents []struct {
@@ -87,18 +102,37 @@ func TestControllerAlertsOnEveryStateConfigMapRecreation(t *testing.T) {
 			})
 		case request.Method == http.MethodPost && request.URL.Path == "/api/v1/namespaces/"+monitorNamespace+"/configmaps":
 			var resource struct {
-				Data map[string]string `json:"data"`
+				Metadata map[string]string `json:"metadata"`
+				Data     map[string]string `json:"data"`
 			}
 			if err := json.NewDecoder(request.Body).Decode(&resource); err != nil {
-				t.Errorf("state ConfigMap create body was invalid: %v", err)
+				t.Errorf("ConfigMap create body was invalid: %v", err)
 			}
-			stateJSON = resource.Data[stateDataKey]
-			configMapExists = true
-			resourceVersion++
-			_ = json.NewEncoder(response).Encode(map[string]any{
-				"metadata": map[string]string{"resourceVersion": strconv.Itoa(resourceVersion)},
-				"data":     map[string]string{stateDataKey: stateJSON},
-			})
+			switch resource.Metadata["name"] {
+			case stateInitializationMarker:
+				if initializationMarkerExists {
+					response.WriteHeader(http.StatusConflict)
+					return
+				}
+				initializationMarkerExists = true
+				response.WriteHeader(http.StatusCreated)
+			case stateConfigMap:
+				if configMapExists {
+					response.WriteHeader(http.StatusConflict)
+					return
+				}
+				stateJSON = resource.Data[stateDataKey]
+				configMapExists = true
+				stateConfigMapCreates++
+				resourceVersion++
+				_ = json.NewEncoder(response).Encode(map[string]any{
+					"metadata": map[string]string{"resourceVersion": strconv.Itoa(resourceVersion)},
+					"data":     map[string]string{stateDataKey: stateJSON},
+				})
+			default:
+				t.Errorf("unexpected ConfigMap create name %q", resource.Metadata["name"])
+				http.NotFound(response, request)
+			}
 		case request.Method == http.MethodPatch && request.URL.Path == statePath():
 			var patch struct {
 				Data map[string]string `json:"data"`
@@ -137,7 +171,7 @@ func TestControllerAlertsOnEveryStateConfigMapRecreation(t *testing.T) {
 		client:    server.Client(),
 	}
 	var logs bytes.Buffer
-	controller, err := NewController(
+	_, err := NewController(
 		context.Background(), config,
 		&mutableRecordClient{record: testRecord(config, config.PagesTarget)},
 		store,
@@ -147,28 +181,61 @@ func TestControllerAlertsOnEveryStateConfigMapRecreation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(warningEvents) != 1 || warningEvents[0].Type != "Warning" || warningEvents[0].Reason != "StateConfigmapRecreated" {
-		t.Fatalf("initial ConfigMap recreation events = %#v, want one StateConfigmapRecreated Warning Event", warningEvents)
+	if !initializationMarkerExists || !configMapExists || stateConfigMapCreates != 1 {
+		t.Fatalf("initial state initialization did not create its marker and ConfigMap: marker=%t state=%t creates=%d", initializationMarkerExists, configMapExists, stateConfigMapCreates)
 	}
-	if !strings.Contains(warningEvents[0].Message, "change history") || !strings.Contains(warningEvents[0].Message, "pending transition") {
-		t.Fatalf("ConfigMap recreation Warning Event omitted the possible state loss: %#v", warningEvents[0])
+	if len(warningEvents) != 1 || warningEvents[0].Type != "Warning" || warningEvents[0].Reason != "StateConfigmapInitialized" {
+		t.Fatalf("initial state initialization events = %#v, want one StateConfigmapInitialized Warning Event", warningEvents)
 	}
-	if strings.Count(logs.String(), "event=state_configmap_recreated") != 1 {
-		t.Fatalf("initial ConfigMap recreation was not logged: %s", logs.String())
+	if strings.Count(logs.String(), "event=state_configmap_initialized") != 1 {
+		t.Fatalf("initial state initialization was not logged: %s", logs.String())
 	}
 
+	lastChange := time.Now().Add(-time.Minute)
+	persistedState, err := json.Marshal(PersistentState{
+		Target: config.PagesTarget,
+		Changes: []time.Time{
+			lastChange.Add(-2 * time.Minute),
+			lastChange.Add(-time.Minute),
+			lastChange,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateJSON = string(persistedState)
 	configMapExists = false
-	if !controller.validateRecordState(context.Background()) {
-		t.Fatal("controller did not validate state after the ConfigMap was recreated")
+	restartedStore := &KubernetesStateStore{
+		endpoint:  server.URL,
+		tokenPath: tokenPath,
+		podName:   "monitor-test-restarted",
+		podUID:    "pod-uid-restarted",
+		client:    server.Client(),
 	}
-	if len(warningEvents) != 2 || warningEvents[1].Type != "Warning" || warningEvents[1].Reason != "StateConfigmapRecreated" {
-		t.Fatalf("subsequent ConfigMap recreation events = %#v, want a Warning Event for each recreation", warningEvents)
+	restarted, err := NewController(
+		context.Background(), config,
+		&mutableRecordClient{record: testRecord(config, config.PagesTarget)},
+		restartedStore,
+		log.New(&logs, "", 0),
+		NewMetrics(),
+	)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(warningEvents[1].Message, "change history") || !strings.Contains(warningEvents[1].Message, "pending transition") {
-		t.Fatalf("subsequent recreation Warning Event omitted the possible state loss: %#v", warningEvents[1])
+	if !restarted.SafetyLocked() {
+		t.Fatal("restart with a missing initialized state ConfigMap must keep DNS writes locked")
 	}
-	if strings.Count(logs.String(), "event=state_configmap_recreated") != 2 {
-		t.Fatalf("subsequent ConfigMap recreation was not logged: %s", logs.String())
+	if configMapExists || stateConfigMapCreates != 1 {
+		t.Fatalf("state-loss recovery recreated an empty ConfigMap: state=%t creates=%d", configMapExists, stateConfigMapCreates)
+	}
+	if len(warningEvents) != 2 || warningEvents[1].Type != "Warning" || warningEvents[1].Reason != "StateConfigmapLost" {
+		t.Fatalf("missing initialized state events = %#v, want one StateConfigmapLost Warning Event", warningEvents)
+	}
+	if !strings.Contains(warningEvents[1].Message, "change history") || !strings.Contains(warningEvents[1].Message, "record writes are disabled") {
+		t.Fatalf("state-loss Warning Event omitted the lost history or write lock: %#v", warningEvents[1])
+	}
+	if strings.Count(logs.String(), "event=state_configmap_lost") != 1 {
+		t.Fatalf("state loss was not logged: %s", logs.String())
 	}
 }
 
@@ -218,7 +285,7 @@ func TestControllerStateReadAlertPreservesTokenReadFailureKind(t *testing.T) {
 
 func TestStateStoreReloadsProjectedTokenForEachRequest(t *testing.T) {
 	tokenPath := writeProjectedTestToken(t, "token-one")
-	expectedTokens := []string{"token-one", "token-two", "token-three"}
+	expectedTokens := []string{"token-one", "token-one", "token-two", "token-three"}
 	requestIndex := 0
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if requestIndex >= len(expectedTokens) || request.Header.Get("Authorization") != "Bearer "+expectedTokens[requestIndex] {
@@ -248,10 +315,10 @@ func TestStateStoreReloadsProjectedTokenForEachRequest(t *testing.T) {
 		podUID:    "pod-uid-test",
 		client:    server.Client(),
 	}
-	if _, recreated, err := store.Load(context.Background()); err != nil {
+	if _, status, err := store.Load(context.Background()); err != nil {
 		t.Fatal(err)
-	} else if recreated {
-		t.Fatal("existing ConfigMap was incorrectly reported as recreated")
+	} else if status != stateLoadExisting {
+		t.Fatalf("existing ConfigMap load status = %d, want existing", status)
 	}
 	if err := os.WriteFile(tokenPath, []byte("token-two"), 0o600); err != nil {
 		t.Fatal(err)
