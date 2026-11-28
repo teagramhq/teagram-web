@@ -1,3 +1,4 @@
+import '@/pages/privateUsernameInvite';
 import './serverPicker.scss';
 import {fetchTeagramDeploymentConfig} from '@config/deploymentConfig';
 import {

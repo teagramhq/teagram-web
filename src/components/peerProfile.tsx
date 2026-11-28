@@ -65,6 +65,7 @@ import {showPeerReport} from '@components/popups/reportAd';
 import CommunityPeerDialogList
 from '@components/communities/communityPeerDialogList';
 import getPeerId from '@appManagers/utils/peers/getPeerId';
+import {createFragmentLinkURL} from '@lib/fragmentLink';
 
 keepMe(ripple);
 
@@ -987,28 +988,24 @@ PeerProfile.Link = () => {
   const context = useContext(PeerProfileContext);
   const {i18n, I18n, toast, showMyQrCodePopup} = useHotReloadGuard();
 
-  const toFill = createMemo<Partial<{url: string, also: JSX.Element}>>(() => {
+  const toFill = createMemo<Partial<{url: string, also: JSX.Element, isPrivate: boolean}>>(() => {
     if(context.peerId.isUser()) {
       return;
     }
 
     const usernames = getPeerActiveUsernames(context.peer as Chat.channel);
     if(context.isTopic) {
-      let url = 't.me/';
       const threadId = getServerMessageId(context.threadId);
       const username = usernames[0];
-      if(username) {
-        url += `${username}/${threadId}`;
-      } else {
-        url += `c/${context.peerId.toChatId()}/${threadId}`;
-      }
-
-      return {url};
+      const url = username ?
+        createFragmentLinkURL({type: 2, username, messageId: BigInt(threadId)}) :
+        createFragmentLinkURL({type: 3, channelId: BigInt(context.peerId.toChatId()), messageId: BigInt(threadId)});
+      return {url, isPrivate: !username};
     }
 
     if(usernames.length) {
       return {
-        url: 't.me/' + usernames[0],
+        url: createFragmentLinkURL({type: 1, username: usernames[0]}),
         also: getUsernamesAlso(usernames)
       };
     }
@@ -1016,17 +1013,17 @@ PeerProfile.Link = () => {
     const exportedInvite = (context.fullPeer as ChatFull.channelFull)?.exported_invite;
     if(exportedInvite?._ === 'chatInviteExported') {
       return {
-        url: exportedInvite.link.slice(exportedInvite.link.indexOf('t.me/'))
+        url: exportedInvite.link
       };
     }
   });
 
   const onClick = () => {
-    const url = 'https://' + toFill().url;
+    const url = toFill().url;
     copyTextToClipboard(url);
     // Promise.resolve(appProfileManager.getChatFull(this.peerId.toChatId())).then((chatFull) => {
     // copyTextToClipboard(chatFull.exported_invite.link);
-    const isPrivate = url.includes('/c/');
+    const isPrivate = !!toFill().isPrivate || url.includes('/c/');
     toast(I18n.format(isPrivate ? 'LinkCopiedPrivateInfo' : 'LinkCopied', true));
     // });
   };

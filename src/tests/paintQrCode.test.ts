@@ -1,4 +1,4 @@
-import {paintQrCode} from '@helpers/qrCode/paintQrCode';
+import {buildTelegramUserQrUrl, paintQrCode} from '@helpers/qrCode/paintQrCode';
 
 describe('paintQrCode', () => {
   afterEach(() => {
@@ -32,5 +32,9 @@ describe('paintQrCode', () => {
 
     expect(result.canvas).toBeInstanceOf(HTMLCanvasElement);
     expect(result.canvas.parentElement).toBe(host);
+  });
+
+  it('encodes a username QR as the canonical v1 profile link', () => {
+    expect(buildTelegramUserQrUrl('alice')).toBe('https://web.teagram.io/#~QQHDpNc');
   });
 });

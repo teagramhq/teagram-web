@@ -1,3 +1,4 @@
+import '@/pages/privateUsernameInvite';
 import {IS_POPUP_SANDBOX, IS_PREVIEW} from '@config/debug';
 
 /*

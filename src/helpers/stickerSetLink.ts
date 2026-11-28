@@ -1,5 +1,6 @@
 import {SHORT_NAME_PATTERN} from '@helpers/stickerPackCommon';
 import {logger} from '@lib/logger';
+import {createFragmentLinkURL} from '@lib/fragmentLink';
 
 let stickerSetLinkPrefix: string | undefined;
 const stickerSetLinkLogger = logger('StickerSetLink');
@@ -68,9 +69,7 @@ export function createStickerSetShareLink(prefix: string, shortName: string, isE
     throw new Error('Invalid sticker set link prefix');
   }
 
-  const basePath = base.pathname.endsWith('/') ? base.pathname : `${base.pathname}/`;
-  base.pathname = `${basePath}${isEmoji ? 'addemoji' : 'addstickers'}/${shortName}`;
-  return base.toString();
+  return createFragmentLinkURL({type: isEmoji ? 7 : 6, shortName});
 }
 
 export function parseStickerSetShareLink(value: string, prefix?: string): {shortName: string, isEmoji: boolean} | undefined {

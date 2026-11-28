@@ -4,6 +4,7 @@ import {readStickerPackZip, validateStickerPackFiles} from '@helpers/stickerPack
 import {BoundedZipInflate, readStickerPackZipBytes} from '@helpers/stickerPackImportZip';
 import {getStickerFileMimeType, isStickerPackImportEnabled} from '@helpers/stickerPackCommon';
 import {captureInitialStickerSetShareLink, createStickerSetShareLink, parseStickerSetShareLink, processInitialStickerSetShareLink, setStickerSetLinkPrefix} from '@helpers/stickerSetLink';
+import {decodeFragmentLink} from '@/lib/fragmentLink';
 
 const makeFile = (name: string, size: number) => new File([new Uint8Array(size)], name);
 
@@ -213,14 +214,16 @@ describe('sticker set share links', () => {
     }
   });
 
-  it('builds and parses a link using the server prefix and set type', () => {
-    const stickers = createStickerSetShareLink('https://teagram.test/links/', 'cats_a', false);
-    const emoji = createStickerSetShareLink('https://teagram.test/links/', 'faces_2', true);
+  it('builds canonical v1 sticker and emoji links and still parses legacy routes', () => {
+    const stickers = createStickerSetShareLink('https://teagram.test/links/', 'funny_cats', false);
+    const emoji = createStickerSetShareLink('https://teagram.test/links/', 'emoji_pack', true);
 
-    expect(stickers).toBe('https://teagram.test/links/addstickers/cats_a');
-    expect(emoji).toBe('https://teagram.test/links/addemoji/faces_2');
-    expect(parseStickerSetShareLink(stickers, 'https://teagram.test/links/')).toEqual({shortName: 'cats_a', isEmoji: false});
-    expect(parseStickerSetShareLink(emoji, 'https://teagram.test/links/')).toEqual({shortName: 'faces_2', isEmoji: true});
+    expect(stickers).toBe('https://web.teagram.io/#~Rg-jJAT_640');
+    expect(emoji).toBe('https://web.teagram.io/#~Rw6FK8h0mt0');
+    expect(decodeFragmentLink(new URL(stickers).hash)).toEqual({type: 6, shortName: 'funny_cats'});
+    expect(decodeFragmentLink(new URL(emoji).hash)).toEqual({type: 7, shortName: 'emoji_pack'});
+    expect(parseStickerSetShareLink('https://teagram.test/links/addstickers/cats_a', 'https://teagram.test/links/'))
+      .toEqual({shortName: 'cats_a', isEmoji: false});
   });
 
   it('rejects links outside the exact server prefix and names outside the allowed pattern', () => {

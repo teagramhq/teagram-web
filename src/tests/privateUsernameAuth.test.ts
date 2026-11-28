@@ -5,8 +5,10 @@ import {authenticatePrivateUsername, isPrivateUsername, isPrivateUsernameCredent
 import {TURNSTILE_QA_BYPASS_LOCAL_STORAGE_KEY} from '@/pages/turnstileSignup';
 import {
   capturePrivateUsernameInviteSecretFromFragment,
+  restorePrivateUsernameV1InviteSecretForRetry,
   restorePrivateUsernameInviteSecretForRetry,
   storePrivateUsernameInviteSecretForAccountSwitch,
+  takePrivateUsernameV1InviteSecretFromFragment,
   takePrivateUsernameInviteSecretFromFragment
 } from '@/pages/privateUsernameInvite';
 
@@ -39,6 +41,49 @@ describe('private username sign-in', () => {
     expect(window.location.hash).toBe('');
     expect(takePrivateUsernameInviteSecretFromFragment()).toBe(secret);
     expect(takePrivateUsernameInviteSecretFromFragment()).toBeUndefined();
+  });
+
+  it('clears a v1 invite fragment before handing its secret to the signup flow', () => {
+    const secret = '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f';
+    window.sessionStorage.removeItem('teagram-invite-secret');
+    window.history.replaceState(window.history.state, '', '/?keep=1#~RQABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f');
+
+    capturePrivateUsernameInviteSecretFromFragment();
+
+    expect(window.location.search).toBe('?keep=1');
+    expect(window.location.hash).toBe('');
+    expect(window.sessionStorage.getItem('teagram-invite-secret')).toBeNull();
+    expect(takePrivateUsernameV1InviteSecretFromFragment()).toBe(secret);
+    expect(takePrivateUsernameInviteSecretFromFragment()).toBeUndefined();
+  });
+
+  it('clears hosted v1 invite fragments without exposing their secrets to this server', () => {
+    window.history.replaceState(window.history.state, '', '/?keep=1#~ZQsL89lf9Nd0cL6ssf__________________________________________');
+
+    capturePrivateUsernameInviteSecretFromFragment();
+
+    expect(window.location.search).toBe('?keep=1');
+    expect(window.location.hash).toBe('');
+    expect(takePrivateUsernameV1InviteSecretFromFragment()).toBeUndefined();
+  });
+
+  it('keeps a v1 retry secret in memory without reading browser storage', () => {
+    const secret = '1'.repeat(64);
+    const sessionStorage = Object.getOwnPropertyDescriptor(window, 'sessionStorage');
+    Object.defineProperty(window, 'sessionStorage', {
+      configurable: true,
+      get() {
+        throw new DOMException('Storage unavailable', 'SecurityError');
+      }
+    });
+
+    try {
+      expect(restorePrivateUsernameV1InviteSecretForRetry(secret)).toBe(true);
+      expect(takePrivateUsernameV1InviteSecretFromFragment()).toBe(secret);
+    } finally {
+      if(sessionStorage) Object.defineProperty(window, 'sessionStorage', sessionStorage);
+      else delete (window as any).sessionStorage;
+    }
   });
 
   it('clears an older pending secret when a fresh fragment arrives', () => {

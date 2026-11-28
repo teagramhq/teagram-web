@@ -6,14 +6,15 @@
 // a non-painting tab still boots
 import '@helpers/dom/previewUnfreeze';
 import '@helpers/dom/previewRaf';
-import '@helpers/stickerSetLink';
-
-// Capture valid invite fragments before app modules can inspect the URL.
 import {
   restorePrivateUsernameInviteSecretForRetry,
-  storePrivateUsernameInviteSecretForAccountSwitch,
-  takePrivateUsernameInviteSecretFromFragment
+  restorePrivateUsernameV1InviteSecretForRetry,
+  takePrivateUsernameInviteSecretFromFragment,
+  takePrivateUsernameV1InviteSecretFromFragment
 } from '@/pages/privateUsernameInvite';
+import {handleSignedInInviteLink} from '@/pages/privateUsernameInviteFlow';
+import '@helpers/stickerSetLink';
+
 import App from '@config/app';
 import blurActiveElement from '@helpers/dom/blurActiveElement';
 import {IS_STICKY_INPUT_BUGGED} from '@helpers/dom/fixSafariStickyInputFocusing';
@@ -141,57 +142,6 @@ async function checkLastActiveAccountFromTMe() {
       }
     }
   } catch(err) {}
-}
-
-async function handleSignedInInviteLink(inviteSecret: string) {
-  const [totalAccounts, hasSomeonePremium] = await Promise.all([
-    AccountController.getTotalAccounts(),
-    apiManagerProxy.hasSomeonePremium()
-  ]);
-
-  const restoreInviteForRetry = () => restorePrivateUsernameInviteSecretForRetry(inviteSecret);
-  const showInviteRetryMessage = () => {
-    toastNew({langPackKey: restoreInviteForRetry() ? 'Teagram.Invite.Retry' : 'Teagram.Invite.RetryUnavailable'});
-  };
-
-  if(
-    totalAccounts >= MAX_ACCOUNTS_PREMIUM ||
-    (totalAccounts === MAX_ACCOUNTS_FREE && !hasSomeonePremium)
-  ) {
-    if(!restoreInviteForRetry()) toastNew({langPackKey: 'Teagram.Invite.RetryUnavailable'});
-    const {default: AccountsLimitPopup} = await import('./components/sidebarLeft/accountsLimitPopup');
-    new AccountsLimitPopup().show();
-    return;
-  }
-
-  const {default: confirmationPopup} = await import('@components/confirmationPopup');
-  try {
-    await confirmationPopup({
-      titleLangKey: 'Teagram.Invite.AddTitle',
-      descriptionLangKey: 'Teagram.Invite.AddText',
-      descriptionLangArgs: [getActiveServerHost()],
-      button: {langKey: 'Teagram.Invite.AddAccount'}
-    });
-  } catch(err) {
-    if(!restoreInviteForRetry()) toastNew({langPackKey: 'Teagram.Invite.RetryUnavailable'});
-    return;
-  }
-
-  if(!storePrivateUsernameInviteSecretForAccountSwitch(inviteSecret)) {
-    showInviteRetryMessage();
-    return;
-  }
-
-  const {default: appSidebarLeft} = await import('./components/sidebarLeft');
-  const result = await appSidebarLeft.addAccount(undefined, true);
-  if(result !== 'added') {
-    if(result === 'max') {
-      const retryStored = restoreInviteForRetry();
-      toastNew({langPackKey: retryStored ? 'Error.AnError' : 'Teagram.Invite.RetryUnavailable'});
-    } else {
-      showInviteRetryMessage();
-    }
-  }
 }
 
 function setManifest() {
@@ -840,8 +790,13 @@ const onDocumentReady = async() => {
   }
 
   if(authState._ === 'authStateSignedIn') {
+    const v1InviteSecret = takePrivateUsernameV1InviteSecretFromFragment();
     const inviteSecret = takePrivateUsernameInviteSecretFromFragment();
-    if(inviteSecret) void handleSignedInInviteLink(inviteSecret).catch(() => {
+    if(v1InviteSecret) {
+      if(getRuntimeServerId() === 'default') void handleSignedInInviteLink(v1InviteSecret, 'v1').catch(() => {
+        toastNew({langPackKey: restorePrivateUsernameV1InviteSecretForRetry(v1InviteSecret) ? 'Teagram.Invite.Retry' : 'Teagram.Invite.RetryUnavailable'});
+      });
+    } else if(inviteSecret) void handleSignedInInviteLink(inviteSecret).catch(() => {
       toastNew({langPackKey: restorePrivateUsernameInviteSecretForRetry(inviteSecret) ? 'Teagram.Invite.Retry' : 'Teagram.Invite.RetryUnavailable'});
     });
   }
