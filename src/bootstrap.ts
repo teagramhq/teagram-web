@@ -53,9 +53,8 @@ function setActiveContext(id: string, host: string, target: MtprotoTarget, disco
   runtime.__TEAGRAM_AUTO_GUEST__ = autoGuest === true;
 }
 
-function setConnectPolicy(host: string, target?: MtprotoTarget, enforceInCurrentDocument = false) {
-  const sources = getServerConnectSources(host, target);
-  setConnectPolicyContent([...sources].join(' '), enforceInCurrentDocument);
+function setConnectPolicy(host: string, target?: MtprotoTarget, enforceInCurrentDocument?: boolean) {
+  setConnectPolicyContent(getServerConnectSources(host, target).join(' '), enforceInCurrentDocument);
 }
 
 function setServerSelectionPolicy() {
@@ -197,6 +196,7 @@ async function activateServer(
     }
   }
 
+  setConnectPolicy(host, target, true);
   const previousId = localStorage.getItem(ACTIVE_SERVER_ID_KEY) || 'default';
   try {
     localStorage.setItem(SERVER_CHOICE_KEY, rememberChoice);
@@ -214,7 +214,6 @@ async function activateServer(
   }
 
   setActiveContext(id, host, target, discovered, autoGuest);
-  setConnectPolicy(host, target);
   document.querySelector('.server-picker')?.remove();
   await import('./index');
 }
