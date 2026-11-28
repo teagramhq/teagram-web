@@ -924,7 +924,7 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     expect(cspViolations).toEqual([]);
 
     await enterServerChange();
-    await expect(page.locator('meta[data-server-policy]')).toHaveAttribute('content', "connect-src 'self' https: wss:;");
+    await expect(page.locator('meta[data-server-policy]')).toHaveAttribute('content', 'connect-src \'self\' https: wss:;');
     await expect(usernameInput).toBeEnabled();
     expect(await page.evaluate(() => {
       const username = document.querySelector('input[aria-label="Username"]');
@@ -1403,6 +1403,7 @@ test('isolates two server tabs when a custom server worker takes control', async
   const webSocketRequests: string[] = [];
   const discoveryRequests: string[] = [];
   const discoveryErrors: string[] = [];
+  const deploymentConfigRequests: string[] = [];
   const customPageNavigations: string[] = [];
   let customPage: Page | undefined;
   let sharePage: Page | undefined;
@@ -1473,6 +1474,7 @@ test('isolates two server tabs when a custom server worker takes control', async
         const host = (request.headers.host || '').replace(/:\d+$/, '');
         const url = new URL(request.url || '/', `https://${host}`);
         if(host === APP_HOST && url.pathname === '/teagram-config.json' && serveConfiguredDefaultServer) {
+          deploymentConfigRequests.push(`https://${host}${url.pathname}`);
           response.writeHead(200, {'cache-control': 'no-store', 'content-type': 'application/json'});
           response.end(JSON.stringify({server: APP_HOST, autoGuest: false}));
         } else if(host === APP_HOST && url.pathname === '/stream/__server-isolation-probe') {
@@ -1612,7 +1614,7 @@ test('isolates two server tabs when a custom server worker takes control', async
       }, streamingDocument(streamingDocId))).toBe(true);
     });
 
-    await runPhase('default username/password sign-in and chat page open', async() => {
+    await runPhase('default username/password sign-in and Saved Messages open', async() => {
       // Sign in from a copy of the selected-server state in its own context, so the tabs the later phases use stay signed out.
       const signInContext = await browser.newContext({ignoreHTTPSErrors: true, storageState: await page.context().storageState({})});
       try {
@@ -1681,24 +1683,14 @@ test('isolates two server tabs when a custom server worker takes control', async
         expect(accountState.userId).toBe(userId);
         expect(accountState.authKeyDigests.length).toBeGreaterThan(0);
 
-        // Read the self chat history through the app's own managers, the call a chat open makes.
-        // The sidebar navigation never settled in CI, and this keeps the check on the websocket route.
-        const history = await signInPage.evaluate(async() => {
-          const managers = (window as any).rootScope.managers;
-          const peer = await managers.appPeersManager.getInputPeerById((window as any).rootScope.myId);
-          const result = await managers.apiManager.invokeApi('messages.getHistory', {
-            peer,
-            offset_id: 0,
-            offset_date: 0,
-            add_offset: 0,
-            limit: 1,
-            max_id: 0,
-            min_id: 0,
-            hash: 0
-          });
-          return result._;
+        await signInPage.evaluate(async() => {
+          const moduleUrl = new URL('/src/lib/appImManager.ts', window.location.origin).href;
+          const {default: appImManager} = await import(moduleUrl);
+          await appImManager.setPeer({peerId: appImManager.myId});
         });
-        expect(history).toMatch(/^messages\.(messages|messagesSlice|channelMessages|messagesNotModified)$/);
+        const savedMessagesChat = signInPage.locator('#column-center .chat.active');
+        await expect(savedMessagesChat).toBeVisible({timeout: 60_000});
+        await expect(savedMessagesChat.locator('.topbar .user-title')).toContainText('Saved Messages', {timeout: 60_000});
 
         const hostAndPath = (requests: string[]) => requests.map((request) => {
           const {hostname, pathname} = new URL(request);
@@ -1711,17 +1703,56 @@ test('isolates two server tabs when a custom server worker takes control', async
         expect(webSocketRoutes).toContainEqual({hostname: SERVER_HOST, pathname: '/apiws'});
         expect(webSocketRoutes).not.toContainEqual({hostname: APP_HOST, pathname: '/apiws'});
 
-        // Reopen the persisted profile in a fresh app context with the deployment config enabled.
-        serveConfiguredDefaultServer = true;
-        const storageState = await signInPage.context().storageState({});
-        const persistedOrigin = storageState.origins.find(({origin}) => origin === appOriginString);
-        const persistedValues = new Map(persistedOrigin?.localStorage.map(({name, value}) => [name, value]));
-        const persistedAccount = JSON.parse(persistedValues.get('account1') || '{}');
-        const persistedPins = JSON.parse(persistedValues.get('teagram.server-pins.v1') || '{}');
-        expect(String(persistedAccount.userId)).toBe(userId);
-        expect(Object.keys(persistedAccount).filter((key) => /^dc\d+_auth_key$/.test(key))).not.toHaveLength(0);
-        expect(persistedPins[APP_HOST]).toEqual(savedState.pin);
-        const upgradeContext = await browser.newContext({ignoreHTTPSErrors: true, storageState});
+        // The base release stored the default profile unprefixed in account1, with legacy auth
+        // mirrors and server selection metadata in their existing localStorage keys.
+        const baseReleaseAccount = await signInPage.evaluate(async() => {
+          const moduleUrl = new URL('/src/lib/accounts/accountController.ts', window.location.origin).href;
+          const {AccountController} = await import(moduleUrl);
+          const account = await AccountController.get(1);
+          const baseReleaseFields = new Set([
+            'auth_key_fingerprint',
+            'push_key',
+            'push_key_fingerprint',
+            'userId',
+            'newAccountUserId',
+            'dcId',
+            'date'
+          ]);
+          return Object.fromEntries(Object.entries(account).filter(([key]) =>
+            baseReleaseFields.has(key) || /^dc\d+_(auth_key|server_salt)$/.test(key)
+          ));
+        });
+        expect(String(baseReleaseAccount.userId)).toBe(userId);
+        const legacyAuthStorage = Object.entries(baseReleaseAccount)
+        .filter(([key]) => /^dc\d+_(auth_key|server_salt)$/.test(key))
+        .map(([name, value]) => ({name, value: JSON.stringify(value)}));
+        expect(legacyAuthStorage.filter(({name}) => /_auth_key$/.test(name))).not.toHaveLength(0);
+        const baseReleaseStorageState = {
+          cookies: [] as never[],
+          origins: [{
+            origin: appOriginString,
+            localStorage: [
+              {name: 'account1', value: JSON.stringify(baseReleaseAccount)},
+              ...legacyAuthStorage,
+              {name: 'auth_key_fingerprint', value: JSON.stringify(baseReleaseAccount.auth_key_fingerprint)},
+              {name: 'user_auth', value: JSON.stringify({
+                date: baseReleaseAccount.date,
+                id: baseReleaseAccount.userId,
+                dcID: baseReleaseAccount.dcId || 0
+              })},
+              {name: 'dc', value: JSON.stringify(baseReleaseAccount.dcId)},
+              {name: 'number_of_accounts', value: JSON.stringify(1)},
+              {name: 'teagram.server-choice.v1', value: APP_HOST},
+              {name: 'teagram.active-server-id.v1', value: 'default'},
+              {name: 'teagram.server-target.v1', value: JSON.stringify(savedState.target)},
+              {name: 'teagram.server-pins.v1', value: JSON.stringify({[APP_HOST]: savedState.pin})}
+            ]
+          }]
+        };
+        const upgradeContext = await browser.newContext({
+          ignoreHTTPSErrors: true,
+          storageState: baseReleaseStorageState
+        });
         try {
           await upgradeContext.route('**/*', (route) => {
             const {hostname} = new URL(route.request().url());
@@ -1746,6 +1777,32 @@ test('isolates two server tabs when a custom server worker takes control', async
           expect(hostAndPath(webSocketRequests)).not.toContainEqual({hostname: APP_HOST, pathname: '/apiws'});
         } finally {
           await upgradeContext.close();
+        }
+
+        // Keep configured-default startup covered separately from the saved-profile upgrade path.
+        serveConfiguredDefaultServer = true;
+        const configuredDiscoveryStart = discoveryRequests.length;
+        const configuredDefaultContext = await browser.newContext({ignoreHTTPSErrors: true});
+        try {
+          await configuredDefaultContext.route('**/*', (route) => {
+            const {hostname} = new URL(route.request().url());
+            return hostname === APP_HOST || hostname === SERVER_HOST || hostname === DEFAULT_DISCOVERY_HOST ? route.continue() : route.abort();
+          });
+          const configuredDefaultPage = await configuredDefaultContext.newPage();
+          await configuredDefaultPage.goto(appOriginString, {waitUntil: 'domcontentloaded'});
+          await expect(configuredDefaultPage.locator('#auth-pages')).toBeVisible({timeout: 60_000});
+          await expect.poll(() => discoveryRequests.slice(configuredDiscoveryStart)).toContain(
+            `https://${DEFAULT_DISCOVERY_HOST}/.well-known/teagramd/client`
+          );
+          expect(deploymentConfigRequests).toContain(`https://${APP_HOST}/teagram-config.json`);
+          expect(await configuredDefaultPage.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_ID__)).toBe('default');
+          expect(hostAndPath(discoveryRequests.slice(configuredDiscoveryStart))).toContainEqual({
+            hostname: DEFAULT_DISCOVERY_HOST,
+            pathname: '/.well-known/teagramd/client'
+          });
+        } finally {
+          serveConfiguredDefaultServer = false;
+          await configuredDefaultContext.close();
         }
       } finally {
         serveConfiguredDefaultServer = false;
