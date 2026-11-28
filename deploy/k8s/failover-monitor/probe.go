@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"time"
 )
 
@@ -55,33 +54,36 @@ func newProbeClient(roots *x509.CertPool, dialContext func(context.Context, stri
 func probeWithClient(ctx context.Context, client *http.Client) error {
 	pageURL, err := url.Parse("https://" + recordName + versionPath)
 	if err != nil {
-		return fmt.Errorf("invalid probe URL")
+		return safeDiagnostic("pages_probe_url_invalid")
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL.String(), nil)
 	if err != nil {
-		return fmt.Errorf("could not construct probe request")
+		return safeDiagnostic("pages_probe_request_invalid")
 	}
 	request.Host = recordName
 	request.Header.Set("Accept", "application/json")
 
 	response, err := client.Do(request)
 	if err != nil {
-		return fmt.Errorf("HTTPS probe failed")
+		return fmt.Errorf("Pages HTTPS probe failed: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTPS probe returned status %s", strconv.Itoa(response.StatusCode))
+		return safeDiagnostic(fmt.Sprintf("pages_http_status_%d", response.StatusCode))
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, 16*1024+1))
-	if err != nil || len(body) > 16*1024 {
-		return fmt.Errorf("version response could not be read")
+	if err != nil {
+		return fmt.Errorf("Pages version response read failed: %w", err)
+	}
+	if len(body) > 16*1024 {
+		return safeDiagnostic("pages_version_response_too_large")
 	}
 	var version deploymentVersion
 	if err := json.Unmarshal(body, &version); err != nil {
-		return fmt.Errorf("version response was not valid JSON")
+		return safeDiagnostic("pages_version_response_invalid_json")
 	}
 	if !commitPattern.MatchString(version.SourceCommit) || !digestPattern.MatchString(version.ArtifactDigest) {
-		return fmt.Errorf("version response did not contain a valid deployment identity")
+		return safeDiagnostic("pages_version_identity_invalid")
 	}
 	return nil
 }

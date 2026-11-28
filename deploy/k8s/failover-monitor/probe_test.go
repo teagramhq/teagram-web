@@ -51,6 +51,8 @@ func TestDirectProbeUsesHostnameAndRejectsUntrustedCertificate(t *testing.T) {
 	untrustedClient := newProbeClient(x509.NewCertPool(), directPageDialContext(config, port))
 	if err := probeWithClient(context.Background(), untrustedClient); err == nil {
 		t.Fatal("probe accepted a certificate outside the configured trust roots")
+	} else if got := safeFailureCause(err); got != "tls_verification_failed" {
+		t.Fatalf("untrusted certificate cause = %q, want tls_verification_failed", got)
 	}
 }
 

@@ -72,7 +72,7 @@ func NewController(ctx context.Context, config Config, recordClient RecordClient
 
 	record, err := recordClient.GetRecord(ctx)
 	if err != nil {
-		controller.alert("record_read_failed", "startup record validation failed; record writes are disabled")
+		controller.alert("record_read_failed", messageWithSafeCause("startup record validation failed; record writes are disabled", err))
 		return finish()
 	}
 	currentTarget, err := validateRecord(record, config)
@@ -135,7 +135,7 @@ func (controller *Controller) observe(ctx context.Context, now time.Time, probeE
 		controller.healthySince = time.Time{}
 		controller.metrics.setProbe(false, now)
 		controller.updateMetrics(now)
-		controller.logger.Printf("level=warn event=pages_probe result=unhealthy consecutive_failures=%d reason=%q", controller.failures, probeErr.Error())
+		controller.logger.Printf("level=warn event=pages_probe result=unhealthy consecutive_failures=%d reason=%q", controller.failures, safeFailureCause(probeErr))
 		if controller.failures >= 3 && controller.target == normalizedPagesTarget(controller.config) {
 			controller.switchTo(ctx, normalizedTunnelTarget(controller.config), "pages_unhealthy", now)
 		}
@@ -189,7 +189,7 @@ func (controller *Controller) switchTo(ctx context.Context, target, reason strin
 
 	currentRecord, err := controller.recordClient.GetRecord(ctx)
 	if err != nil {
-		controller.alert("record_read_before_write_failed", "record write refused because the current record could not be read")
+		controller.alert("record_read_before_write_failed", messageWithSafeCause("record write refused because the current record could not be read", err))
 		return
 	}
 	currentTarget, err := validateRecord(currentRecord, controller.config)
@@ -206,7 +206,7 @@ func (controller *Controller) switchTo(ctx context.Context, target, reason strin
 
 	updatedRecord, err := controller.recordClient.PatchTarget(ctx, target)
 	if err != nil {
-		controller.alert("record_patch_failed", "Cloudflare refused the DNS record update")
+		controller.alert("record_patch_failed", messageWithSafeCause("Cloudflare refused the DNS record update", err))
 		return
 	}
 	updatedTarget, err := validateRecord(updatedRecord, controller.config)

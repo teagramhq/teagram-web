@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -57,6 +58,21 @@ func TestDryRunLogsFailoverAndFailbackDecisions(t *testing.T) {
 		t.Fatalf("simulated changes in the rolling hour = %d, want 2", got)
 	}
 	t.Logf("dry-run evidence: %s", logs.String())
+}
+
+func TestProbeLogUsesSanitizedFailureCause(t *testing.T) {
+	var logs bytes.Buffer
+	controller, err := NewController(context.Background(), testConfig(), nil, nil, log.New(&logs, "", 0), NewMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.observe(context.Background(), time.Now(), fmt.Errorf("private probe detail: %w", context.DeadlineExceeded))
+	if !strings.Contains(logs.String(), `reason="timeout"`) {
+		t.Fatalf("probe log did not classify the timeout: %s", logs.String())
+	}
+	if strings.Contains(logs.String(), "private probe detail") || strings.Contains(logs.String(), "deadline exceeded") {
+		t.Fatalf("probe log exposed the underlying error: %s", logs.String())
+	}
 }
 
 func TestFailureStreakResetsOnHealthyProbe(t *testing.T) {
@@ -241,6 +257,49 @@ func TestWriteReadsAndPersistsTheSingleAllowedRecord(t *testing.T) {
 	}
 }
 
+func TestRecordFailureAlertsIncludeOnlySafeCause(t *testing.T) {
+	config := testConfig()
+	config.WritesEnabled = true
+
+	var readLogs bytes.Buffer
+	readCause := fmt.Errorf("private endpoint detail: %w", context.DeadlineExceeded)
+	_, err := NewController(
+		context.Background(), config,
+		&fakeRecordClient{getErr: readCause},
+		&memoryStateStore{}, log.New(&readLogs, "", 0), NewMetrics(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(readLogs.String(), "event=record_read_failed") || !strings.Contains(readLogs.String(), "cause=timeout") {
+		t.Fatalf("record read alert did not include its safe cause: %s", readLogs.String())
+	}
+	if strings.Contains(readLogs.String(), "private endpoint detail") || strings.Contains(readLogs.String(), "deadline exceeded") {
+		t.Fatalf("record read alert exposed the underlying error: %s", readLogs.String())
+	}
+
+	state := &memoryStateStore{state: PersistentState{Target: config.PagesTarget}}
+	client := &fakeRecordClient{
+		records:  []DNSRecord{testRecord(config, config.PagesTarget), testRecord(config, config.PagesTarget)},
+		patchErr: fmt.Errorf("private API detail: %w", context.DeadlineExceeded),
+	}
+	var patchLogs bytes.Buffer
+	controller, err := NewController(context.Background(), config, client, state, log.New(&patchLogs, "", 0), NewMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	for attempt := 0; attempt < 3; attempt++ {
+		controller.observe(context.Background(), start.Add(time.Duration(attempt)*probeInterval), errors.New("probe failed"))
+	}
+	if !strings.Contains(patchLogs.String(), "event=record_patch_failed") || !strings.Contains(patchLogs.String(), "cause=timeout") {
+		t.Fatalf("record patch alert did not include its safe cause: %s", patchLogs.String())
+	}
+	if strings.Contains(patchLogs.String(), "private API detail") || strings.Contains(patchLogs.String(), "deadline exceeded") {
+		t.Fatalf("record patch alert exposed the underlying error: %s", patchLogs.String())
+	}
+}
+
 func testRecord(config Config, target string) DNSRecord {
 	return DNSRecord{
 		ID:      config.RecordID,
@@ -252,11 +311,16 @@ func testRecord(config Config, target string) DNSRecord {
 }
 
 type fakeRecordClient struct {
-	records []DNSRecord
-	patched []string
+	records  []DNSRecord
+	patched  []string
+	getErr   error
+	patchErr error
 }
 
 func (client *fakeRecordClient) GetRecord(context.Context) (DNSRecord, error) {
+	if client.getErr != nil {
+		return DNSRecord{}, client.getErr
+	}
 	if len(client.records) == 0 {
 		return DNSRecord{}, fmt.Errorf("no fake record left")
 	}
@@ -267,6 +331,9 @@ func (client *fakeRecordClient) GetRecord(context.Context) (DNSRecord, error) {
 
 func (client *fakeRecordClient) PatchTarget(_ context.Context, target string) (DNSRecord, error) {
 	client.patched = append(client.patched, target)
+	if client.patchErr != nil {
+		return DNSRecord{}, client.patchErr
+	}
 	return DNSRecord{}, nil
 }
 

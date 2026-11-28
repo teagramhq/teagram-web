@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -43,6 +44,31 @@ func TestCloudflarePatchChangesOnlyTargetAndForcesProxy(t *testing.T) {
 	if target, err := validateRecord(record, config); err != nil || target != config.TunnelTarget {
 		t.Fatalf("updated record validation = %q, %v", target, err)
 	}
+}
+
+func TestCloudflareRequestPreservesTransportCause(t *testing.T) {
+	transportCause := errors.New("transport failure detail")
+	client := NewCloudflareClient(testConfig(), "test-only-token")
+	client.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, transportCause
+	})}
+
+	_, err := client.GetRecord(context.Background())
+	if !errors.Is(err, transportCause) {
+		t.Fatalf("Cloudflare request error = %v, want wrapped transport cause", err)
+	}
+	if got := safeFailureCause(err); got != "request_failed" {
+		t.Fatalf("safe cause = %q, want request_failed", got)
+	}
+	if strings.Contains(safeFailureCause(err), "transport failure detail") {
+		t.Fatal("safe cause exposed the underlying transport error")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (roundTrip roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return roundTrip(request)
 }
 
 func mustJSON(value any) string {
