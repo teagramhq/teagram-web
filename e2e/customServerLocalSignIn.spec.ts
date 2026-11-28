@@ -1548,7 +1548,6 @@ test('isolates two server tabs when a custom server worker takes control', async
       await password.fill(SERVER_PASSWORD);
       await auth.getByRole('button', {name: 'Next'}).click();
       await expect(page.locator('#page-chats')).toBeVisible({timeout: 60_000});
-      await expect(page.locator('#auth-pages')).toHaveCount(0);
       expect(Number(await page.evaluate(() => String((window as any).rootScope.myId)))).toBeGreaterThan(0);
 
       expect(discoveryRequests).toEqual([`https://${DEFAULT_DISCOVERY_HOST}/.well-known/teagramd/client`]);
@@ -1571,6 +1570,7 @@ test('isolates two server tabs when a custom server worker takes control', async
 
       await page.reload({waitUntil: 'domcontentloaded'});
       await expect(page.locator('#page-chats')).toBeVisible({timeout: 60_000});
+      await expect(page.locator('#auth-pages')).toHaveCount(0);
       await expect(page.getByRole('dialog')).toHaveCount(0);
       expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_ID__)).toBe('default');
       expect(await getSavedState()).toEqual(savedState);
