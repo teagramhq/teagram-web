@@ -2060,7 +2060,7 @@ test('isolates two server tabs when a custom server worker takes control', async
   expect(completedPhases).toEqual([
     'setup',
     'streaming: default tab',
-    'default username/password sign-in and chat page open',
+    'default username/password sign-in and Saved Messages open',
     'worker takeover',
     'identity handshake',
     'streaming isolation',
