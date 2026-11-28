@@ -1683,9 +1683,12 @@ test('isolates two server tabs when a custom server worker takes control', async
         expect(accountState.userId).toBe(userId);
         expect(accountState.authKeyDigests.length).toBeGreaterThan(0);
 
+        await signInPage.waitForFunction(() => {
+          const manager = (window as any).appImManager;
+          return manager?.chats?.length > 0 && manager.chat?.container?.isConnected;
+        }, undefined, {timeout: 60_000});
         await signInPage.evaluate(async() => {
-          const moduleUrl = new URL('/src/lib/appImManager.ts', window.location.origin).href;
-          const {default: appImManager} = await import(moduleUrl);
+          const appImManager = (window as any).appImManager;
           await appImManager.setPeer({peerId: appImManager.myId});
         });
         const savedMessagesChat = signInPage.locator('#column-center .chat.active');
