@@ -26,6 +26,7 @@ import PopupReactedList from '@components/popups/reactedList';
 import {ChatReactionsMenu, REACTION_CONTAINER_SIZE} from '@components/chat/reactionsMenu';
 import getPeerId from '@appManagers/utils/peers/getPeerId';
 import getServerMessageId from '@appManagers/utils/messageId/getServerMessageId';
+import {buildFragmentLinkURL} from '@helpers/fragmentLinkURL';
 import {AppManagers} from '@lib/managers';
 import positionMenu, {MenuPositionPadding, positionFloatingMenu} from '@helpers/positionMenu';
 import {getAppWindow, getOverlayRoot} from '@helpers/appWindow';
@@ -1905,18 +1906,18 @@ export default class ChatContextMenu {
 
     const isDiscussionFromChannel = !!(threadMessage?.fwd_from?.channel_post && threadMessage.fwd_from.saved_from_msg_id);
     const username = await this.managers.appPeersManager.getPeerUsername(isDiscussionFromChannel ? threadMessage.fromId : peerId);
-    const msgId = getServerMessageId(mid);
-    let url = 'https://t.me/';
+    let url: string;
     if(username) {
-      url += username;
-      if(isDiscussionFromChannel) url += `/${getServerMessageId(threadMessage.fwd_from.channel_post)}?comment=${msgId}`;
-      else if(threadId) url += `/${getServerMessageId(threadId)}/${msgId}`;
-      else url += '/' + msgId;
+      const messageId = isDiscussionFromChannel ?
+        getServerMessageId(threadMessage.fwd_from.channel_post) :
+        getServerMessageId(mid);
+      url = await buildFragmentLinkURL({type: 2, username, messageId: BigInt(messageId)});
     } else {
-      url += 'c/' + peerId.toChatId();
-      if(threadMessage) url += `/${msgId}?thread=${getServerMessageId(threadMessage.mid)}`;
-      else if(threadId) url += `/${getServerMessageId(threadId)}/${msgId}`;
-      else url += '/' + msgId;
+      url = await buildFragmentLinkURL({
+        type: 3,
+        channelId: BigInt(peerId.toChatId()),
+        messageId: BigInt(getServerMessageId(mid))
+      });
     }
 
     return {url, isPrivate: !username};

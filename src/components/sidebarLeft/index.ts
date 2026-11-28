@@ -1750,7 +1750,7 @@ export class AppSidebarLeft extends SidebarSlider {
     });
   }
 
-  public addAccount = async(e?: MouseEvent | TouchEvent, forceSameTab = false): Promise<'added' | 'limit' | 'max'> => {
+  public addAccount = async(e?: MouseEvent | TouchEvent, forceSameTab = false, hash?: string): Promise<'added' | 'limit' | 'max'> => {
     const totalAccounts = await AccountController.getTotalAccounts();
     if(totalAccounts >= MAX_ACCOUNTS) return 'max';
 
@@ -1778,7 +1778,7 @@ export class AppSidebarLeft extends SidebarSlider {
       await pause(200);
     }
 
-    changeAccount((totalAccounts + 1) as ActiveAccountNumber, newTab);
+    changeAccount((totalAccounts + 1) as ActiveAccountNumber, newTab, undefined, hash);
     return 'added';
   };
 }

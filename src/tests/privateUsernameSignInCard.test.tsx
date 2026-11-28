@@ -13,7 +13,8 @@ const mocks = vi.hoisted(() => ({
   createGuest: vi.fn(),
   reauthenticateGuest: vi.fn(),
   guestLifecycleOptions: vi.fn(),
-  toastNew: vi.fn()
+  toastNew: vi.fn(),
+  handleSignedInInviteLink: vi.fn()
 }));
 
 vi.mock('@/pages/authFlow', () => ({
@@ -46,6 +47,9 @@ vi.mock('@lib/guestAccountLifecycle', () => ({
     mocks.guestLifecycleOptions(options);
     return {create: mocks.createGuest, reauthenticate: mocks.reauthenticateGuest};
   }
+}));
+vi.mock('@/pages/privateUsernameInviteFlow', () => ({
+  handleSignedInInviteLink: mocks.handleSignedInInviteLink
 }));
 
 vi.mock('@components/mediaHeader', () => {
@@ -153,7 +157,20 @@ vi.mock('@lib/richTextProcessor/wrapRichText', () => ({
 
 import PrivateSignInCard from '@/pages/cards/PrivateSignInCard';
 import {clearPrivateUsernameLogin, isPrivateUsernameLogin} from '@/pages/privateUsernameLoginState';
-import {capturePrivateUsernameInviteSecretFromFragment, takePrivateUsernameInviteSecretFromFragment} from '@/pages/privateUsernameInvite';
+import {
+  capturePrivateUsernameInviteSecretFromFragment,
+  takePrivateUsernameInviteSecretFromFragment,
+  takePrivateUsernameV1InviteFragment
+} from '@/pages/privateUsernameInvite';
+import {resolvePrivateUsernameV1InviteSecret} from '@/pages/privateUsernameInviteV1';
+
+// Mirrors the page start: the fragment is stashed on load, then decoded before the card mounts.
+const captureV1InviteSecret = () => {
+  capturePrivateUsernameInviteSecretFromFragment();
+  const fragment = takePrivateUsernameV1InviteFragment();
+  if(fragment) resolvePrivateUsernameV1InviteSecret(fragment);
+};
+import {encodeFragmentLink} from '@/lib/fragmentLink';
 import {
   SERVER_CHOICE_KEY,
   SERVER_LOGIN_USERNAME_KEY,
@@ -219,6 +236,7 @@ describe('private username sign-in card', () => {
     mocks.reauthenticateGuest.mockReset().mockResolvedValue({kind: 'noGuest'});
     mocks.guestLifecycleOptions.mockReset();
     mocks.toastNew.mockReset();
+    mocks.handleSignedInInviteLink.mockReset();
     delete (window as any).__TEAGRAM_ACTIVE_GUEST_SIGN_UP__;
     (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__ = 'demo.teagram.io';
     delete (window as any).__TEAGRAM_AUTO_GUEST__;
@@ -903,6 +921,30 @@ describe('private username sign-in card', () => {
     expect(consoleError).not.toHaveBeenCalled();
   });
 
+  it('opens the v1 invite account flow after an existing user signs in', async() => {
+    const secret = '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f';
+    history.replaceState(history.state, '', `${location.pathname}${location.search}${encodeFragmentLink({
+      type: 5,
+      secret: Uint8Array.from({length: 32}, (_, index) => index)
+    })}`);
+    captureV1InviteSecret();
+    mocks.getAppConfig.mockResolvedValue({registration_mode: 'closed'});
+    mocks.invokeApi
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockResolvedValueOnce({_ : 'auth.authorization', user: {_ : 'user', id: 42, first_name: 'Alice'}});
+
+    const input = mount();
+    await vi.waitFor(() => expect(mocks.getAppConfig).toHaveBeenCalledOnce());
+    input.value = USERNAME;
+    input.dispatchEvent(new Event('input', {bubbles: true}));
+    (document.querySelector('button') as HTMLButtonElement).click();
+
+    await vi.waitFor(() => expect(mocks.handleSignedInInviteLink).toHaveBeenCalledWith(secret, 'v1'));
+    expect(mocks.setUser).toHaveBeenCalledWith({_ : 'user', id: 42, first_name: 'Alice'}, false);
+    expect(mocks.toIm).toHaveBeenCalledOnce();
+    expect(window.sessionStorage.getItem('teagram-invite-secret')).toBeNull();
+  });
+
   it.each(['AUTH_KEY_UNKNOWN', 'AUTH_KEY_RATE_LIMIT'])('shows a retryable sign-in error and re-enables submit after %s', async(type) => {
     let rejectRequest!: (error: unknown) => void;
     mocks.invokeApi.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRequest = reject; }));
@@ -1030,6 +1072,24 @@ describe('private username sign-in card', () => {
     expect(inviteSecret).not.toBeNull();
     expect(inviteSecret.getAttribute('aria-describedby')).toBe('registration-invite-secret-status');
     expect(document.getElementById('registration-invite-secret-status')?.textContent).toBe('Paste the invite link or code you were sent.');
+  });
+
+  it('prefers a fresh v1 invite over a stale legacy invite in session storage', async() => {
+    const secret = '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f';
+    sessionStorage.setItem('teagram-invite-secret', 'f'.repeat(64));
+    history.replaceState(history.state, '', `${location.pathname}${location.search}${encodeFragmentLink({
+      type: 5,
+      secret: Uint8Array.from({length: 32}, (_, index) => index)
+    })}`);
+    captureV1InviteSecret();
+    mocks.getAppConfig.mockResolvedValue({registration_mode: 'invite'});
+
+    mount();
+    await vi.waitFor(() => expect(Array.from(document.querySelectorAll('button')).some((button) => button.textContent === 'Create account')).toBe(true));
+    (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement).click();
+
+    expect((document.querySelector('input[aria-label="Invite link or code"]') as HTMLInputElement).value).toBe(secret);
+    expect(sessionStorage.getItem('teagram-invite-secret')).toBeNull();
   });
 
   it('keeps registration fields and allows a retry after an expired or rejected Turnstile token', async() => {

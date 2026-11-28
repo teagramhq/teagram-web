@@ -107,11 +107,13 @@ function createSharedState(self: User.user, peerId: PeerId = rootScope.myId, ove
   // group's invite link, which PeerProfile.Link already resolved. Otherwise mirror
   // Telegram-iOS' QR codeLink (ChatQrCodeScreen.swift L1740-1748): username →
   // t.me/<username>; a user without one → t.me/+<phone>; a channel → t.me/c/<id>.
+  // The v1 profile link comes from a lazily loaded encoder; the QR waits for it.
+  const [usernameQrUrl] = createResource(() => !overrideUrl && username() || undefined, buildTelegramUserQrUrl);
   const profileUrl = createMemo(() => {
     if(overrideUrl) return overrideUrl;
     const tokenUrl = contactTokenUrl();
     if(tokenUrl) return tokenUrl;
-    if(username()) return buildTelegramUserQrUrl(username());
+    if(username()) return usernameQrUrl();
     if(peerId.isUser()) return `https://t.me/+${(self as User.user).phone ?? ''}`;
     return `https://t.me/c/${peerId.toChatId()}`;
   });
@@ -365,13 +367,15 @@ function TopSection(props: {
   const regenerateQr = async() => {
     const ctor = QRCodeStylingCtor();
     if(!ctor) return;
+    const data = profileUrl();
+    if(!data) return;
     const id = ++qrRepaintId;
     const scratch = document.createElement('div');
     // iOS uses solid black QR ink on the white card (ChatQrCodeScreen.swift
     // L1754 `color: .black`) and a solid-black logo circle (L2044-2058
     // `generateFilledCircleImage(... color: .black)`). No theme dependence.
     await paintQrCode({
-      data: profileUrl(),
+      data,
       size: QR_SIZE,
       host: scratch,
       background: 'rgba(0,0,0,0)',

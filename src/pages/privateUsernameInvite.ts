@@ -1,7 +1,18 @@
 const INVITE_SECRET_PATTERN = /^[\da-f]{64}$/i;
 const INVITE_SECRET_SESSION_KEY = 'teagram-invite-secret';
+// Version 1, type 5 (invite), with or without a host: the first two code characters.
+const V1_INVITE_PREFIX = /^#~[RZ][Q-Za-f]/;
 
 let inviteSecretFromFragment: string | undefined;
+let v1InviteFragment: string | undefined;
+
+function clearFragment() {
+  window.history.replaceState(
+    window.history.state,
+    '',
+    `${window.location.pathname}${window.location.search}`
+  );
+}
 
 export function parsePrivateUsernameInviteSecret(value: string): string | undefined {
   const trimmed = value.trim();
@@ -12,15 +23,25 @@ export function parsePrivateUsernameInviteSecret(value: string): string | undefi
 }
 
 export function capturePrivateUsernameInviteSecretFromFragment() {
-  const secret = window.location.hash.slice(1);
-  if(!INVITE_SECRET_PATTERN.test(secret)) return;
+  const fragment = window.location.hash;
+  const secret = fragment.slice(1);
+  if(INVITE_SECRET_PATTERN.test(secret)) {
+    inviteSecretFromFragment = secret.toLowerCase();
+    clearFragment();
+    return;
+  }
 
-  inviteSecretFromFragment = secret.toLowerCase();
-  window.history.replaceState(
-    window.history.state,
-    '',
-    `${window.location.pathname}${window.location.search}`
-  );
+  if(!V1_INVITE_PREFIX.test(fragment)) return;
+  // The address bar is cleared and the raw code is held here before any other code runs;
+  // the strict decoder is a separate chunk, so it only loads when an invite link arrives.
+  clearFragment();
+  v1InviteFragment = fragment;
+}
+
+export function takePrivateUsernameV1InviteFragment() {
+  const fragment = v1InviteFragment;
+  v1InviteFragment = undefined;
+  return fragment;
 }
 
 export function takePrivateUsernameInviteSecretFromFragment() {

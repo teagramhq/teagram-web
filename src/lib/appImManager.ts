@@ -108,6 +108,7 @@ import liteMode, {LiteModeKey} from '@helpers/liteMode';
 import LottiePlayer from '@lib/lottie/lottiePlayer';
 import PopupGiftPremium from '@components/popups/giftPremium';
 import internalLinkProcessor from '@lib/internalLinkProcessor';
+import {getRuntimeServerId} from '@config/serverContext';
 import {INTERNAL_LINK_TYPE} from '@lib/internalLink';
 import {createStoriesViewerWithPeer} from '@components/stories/viewer';
 import type {CustomEmojiRendererElement} from '@lib/customEmoji/renderer';
@@ -1892,6 +1893,18 @@ export class AppImManager extends EventListenerBase<{
 
   private onHashChangeUnsafe = (saveState?: boolean) => {
     const hash = location.hash;
+    if(hash.startsWith('#~')) {
+      window.history.replaceState(
+        window.history.state,
+        '',
+        `${window.location.pathname}${window.location.search}`
+      );
+      appNavigationController.overrideHash('');
+      // The decoder is a separate chunk: it stays off the startup path until a fragment link arrives.
+      void import('@lib/fragmentLinkOpen').then(({openFragmentLink}) => openFragmentLink(hash, getRuntimeServerId() === 'default')).catch(() => {});
+      return;
+    }
+
     if(!saveState) {
       if(!USE_NAVIGATION_API) {
         appNavigationController.replaceState();

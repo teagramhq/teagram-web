@@ -1,6 +1,9 @@
 import type {MtprotoTarget} from '@config/mtprotoTarget';
 import {validatePrivateEndpoint, validateMtprotoTarget} from '@config/mtprotoTarget';
 import {TELEGRAM_BOT_API_ORIGIN} from '@config/telegramBotApi';
+import {normalizeServerHost} from '@config/serverHost';
+
+export {normalizeServerHost};
 import {notifyGuestCredentialInvalidation} from '@lib/guestCredentialBroadcast';
 
 export const SERVER_CHOICE_KEY = 'teagram.server-choice.v1';
@@ -212,34 +215,6 @@ async function sha1(bytes: Uint8Array) {
   const input = new Uint8Array(bytes.length);
   input.set(bytes);
   return new Uint8Array(await crypto.subtle.digest('SHA-1', input.buffer));
-}
-
-export function normalizeServerHost(input: string) {
-  const value = input.trim();
-  if(value.includes(':')) {
-    throw new Error('Enter the address without a port');
-  }
-  if(!value || /[\/?#@\\\s]/.test(value)) {
-    throw new Error('Enter a valid server host');
-  }
-
-  let url: URL;
-  try {
-    url = new URL('https://' + value);
-  } catch{
-    throw new Error('Enter a valid server host');
-  }
-
-  const host = url.hostname.toLowerCase().replace(/\.+$/, '');
-  if(host === 'telegram.org' || host.endsWith('.telegram.org')) {
-    throw new Error('This server host is not allowed');
-  }
-  if(!host || url.username || url.password || url.pathname !== '/' || url.search || url.hash ||
-    host.length > 253 || host.split('.').some((label) => !label || label.length > 63 ||
-      !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label))) {
-    throw new Error('Enter a valid server host');
-  }
-  return host;
 }
 
 export async function validateDiscoveryDocument(hostInput: string, value: unknown): Promise<DiscoveredServer> {

@@ -16,7 +16,7 @@ import {
   SERVER_USERNAME_DRAFT_KEY
 } from '@config/serverSelection';
 import type {ServerSelectionState} from '@config/serverSelection';
-import {getActiveServerHost, getActiveTurnstileSiteKey, isActiveGuestSignUpEnabled, isAutoGuestEnabled} from '@config/serverContext';
+import {getActiveServerHost, getActiveTurnstileSiteKey, getRuntimeServerId, isActiveGuestSignUpEnabled, isAutoGuestEnabled} from '@config/serverContext';
 import {DEMO_SERVER_HOST} from '@config/serverSelection';
 import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
 import cancelEvent from '@helpers/dom/cancelEvent';
@@ -46,6 +46,10 @@ import {
   storePrivateUsernameInviteSecretForAccountSwitch,
   takePrivateUsernameInviteSecretFromFragment
 } from '@/pages/privateUsernameInvite';
+import {
+  restorePrivateUsernameV1InviteSecretForRetry,
+  takePrivateUsernameV1InviteSecretFromFragment
+} from '@/pages/privateUsernameInviteV1';
 import styles from '@/pages/authFlow.module.scss';
 
 if(import.meta.hot) import.meta.hot.accept();
@@ -77,7 +81,10 @@ type PrivateUsernameUiError =
 
 export default function PrivateSignInCard(_props: {spec: Spec}) {
   const {managers, navigate, toIm} = useAuthFlow();
-  const inviteSecretFromLink = takePrivateUsernameInviteSecretFromFragment();
+  const v1InviteSecret = takePrivateUsernameV1InviteSecretFromFragment();
+  const v1InviteSecretFromLink = getRuntimeServerId() === 'default' ? v1InviteSecret : undefined;
+  const legacyInviteSecretFromLink = takePrivateUsernameInviteSecretFromFragment();
+  const inviteSecretFromLink = v1InviteSecretFromLink || legacyInviteSecretFromLink;
   const turnstile = useTurnstileChallenge();
   const guestSignUpAvailable = isActiveGuestSignUpEnabled();
   const autoGuest = isAutoGuestEnabled();
@@ -486,6 +493,11 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
 
     const serverInput = document.querySelector<HTMLInputElement>('#server-address');
     if(!serverInput?.value.trim()) return;
+    if(v1InviteSecretFromLink) {
+      restorePrivateUsernameV1InviteSecretForRetry(v1InviteSecretFromLink);
+      toastNew({langPackKey: 'Teagram.Invite.RetryUnavailable'});
+      return;
+    }
     if(inviteSecretFromLink && !storePrivateUsernameInviteSecretForAccountSwitch(inviteSecretFromLink)) {
       toastNew({langPackKey: 'Teagram.Invite.RetryUnavailable'});
       return;
@@ -640,6 +652,14 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
         case 'authorized':
           await managers.apiManager.setUser(result.user, isCreatingAccount);
           await toIm();
+          if(!isCreatingAccount && v1InviteSecretFromLink) {
+            try {
+              const {handleSignedInInviteLink} = await import('@/pages/privateUsernameInviteFlow');
+              await handleSignedInInviteLink(v1InviteSecretFromLink, 'v1');
+            } catch{
+              toastNew({langPackKey: restorePrivateUsernameV1InviteSecretForRetry(v1InviteSecretFromLink) ? 'Teagram.Invite.Retry' : 'Teagram.Invite.RetryUnavailable'});
+            }
+          }
           break;
         case 'error':
           if(!isCreatingAccount && (result.authKeyRecoveryFailed || result.errorType === 'AUTH_KEY_UNKNOWN' || result.errorType === 'AUTH_KEY_RATE_LIMIT')) {

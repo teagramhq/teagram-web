@@ -35,6 +35,7 @@ import rootScope from '@lib/rootScope';
 import {IconTsx} from '@components/iconTsx';
 import formatStarsAmount, {formatStarsAmountExact} from '@appManagers/utils/payments/formatStarsAmount';
 import {getStarsTransactionPresentation, getStarsTransactionMessagePeerId, getStarsTransactionFullAmount, starsTransactionProviders} from '@appManagers/utils/payments/starsTransaction';
+import {buildFragmentLinkURL} from '@helpers/fragmentLinkURL';
 import safeWindowOpen from '@helpers/dom/safeWindowOpen';
 import anchorCallback from '@helpers/dom/anchorCallback';
 import DEBUG from '@config/debug';
@@ -254,7 +255,16 @@ export default function showStarsPayPopup(options: StarsPayOptions): StarsPayHan
         const mid = transaction.giveaway_post_id || transaction.msg_id;
         if(!peerId || !mid) return;
         const serverMsgId = getServerMessageId(mid);
-        return peerId.isUser() ? undefined : `https://t.me/c/${peerId.toChatId()}/${serverMsgId}`;
+        if(peerId.isUser()) return undefined;
+
+        const username = await rootScope.managers.appPeersManager.getPeerUsername(peerId);
+        return username ?
+          await buildFragmentLinkURL({type: 2, username, messageId: BigInt(serverMsgId)}) :
+          await buildFragmentLinkURL({
+            type: 3,
+            channelId: BigInt(peerId.toChatId()),
+            messageId: BigInt(serverMsgId)
+          });
       })()
     ]);
 

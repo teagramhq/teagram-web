@@ -3,6 +3,7 @@ import {LangPackKey} from '@lib/langPack';
 import {copyTextToClipboard} from '@helpers/clipboard';
 import cancelEvent from '@helpers/dom/cancelEvent';
 import {attachClickEvent} from '@helpers/dom/clickEvent';
+import {buildFragmentLinkURL} from '@helpers/fragmentLinkURL';
 
 const T_ME = 'https://t.me/';
 export default function anchorCopy(options: Partial<{
@@ -20,8 +21,7 @@ export default function anchorCopy(options: Partial<{
   }
 
   if(options.username) {
-    const href = T_ME + options.username;
-    anchor.href = href;
+    void buildFragmentLinkURL({type: 1, username: options.username}).then((href) => anchor.href = href);
     copyWhat = anchor.innerText = '@' + options.username;
     copyText = 'UsernameCopied';
   }
