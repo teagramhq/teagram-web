@@ -452,6 +452,73 @@ func TestPendingTransitionReconcilesAfterFinalStateSaveFailure(t *testing.T) {
 	}
 }
 
+func TestPatchErrorThatAppliedTransitionRecoversOnRevalidation(t *testing.T) {
+	config := testConfig()
+	config.WritesEnabled = true
+	state := &memoryStateStore{state: PersistentState{Target: config.PagesTarget}}
+	client := &mutableRecordClient{
+		record:           testRecord(config, config.PagesTarget),
+		patchErrors:      []error{errors.New("simulated Cloudflare timeout")},
+		applyPatchErrors: true,
+	}
+	var logs bytes.Buffer
+	controller, err := NewController(context.Background(), config, client, state, log.New(&logs, "", 0), NewMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	for attempt := 0; attempt < 3; attempt++ {
+		controller.observe(context.Background(), start.Add(time.Duration(attempt)*probeInterval), errors.New("probe failed"))
+	}
+	if client.record.Content != config.TunnelTarget || !controller.SafetyLocked() {
+		t.Fatalf("ambiguous PATCH did not leave the monitor locked on the applied target: record=%q locked=%t", client.record.Content, controller.SafetyLocked())
+	}
+	if state.state.Pending == nil || state.state.Pending.PatchVerified {
+		t.Fatalf("failed PATCH did not leave an unverified journal entry: %#v", state.state)
+	}
+
+	controller.retryRecordValidation(context.Background())
+	if controller.SafetyLocked() || controller.CurrentTarget() != config.TunnelTarget {
+		t.Fatalf("revalidation did not recover the applied PATCH: locked=%t target=%q logs=%s", controller.SafetyLocked(), controller.CurrentTarget(), logs.String())
+	}
+	if state.state.Pending != nil || state.state.Target != config.TunnelTarget || len(state.state.Changes) != 1 {
+		t.Fatalf("revalidation did not persist the verified transition exactly once: %#v", state.state)
+	}
+	if !strings.Contains(logs.String(), "event=record_patch_recovered") {
+		t.Fatalf("recovered PATCH was not logged: %s", logs.String())
+	}
+}
+
+func TestVerifiedPendingSaveRetriesOnRevalidation(t *testing.T) {
+	config := testConfig()
+	config.WritesEnabled = true
+	state := &memoryStateStore{
+		state:      PersistentState{Target: config.PagesTarget},
+		saveErrors: []error{nil, errors.New("simulated verified state save failure")},
+	}
+	client := &mutableRecordClient{record: testRecord(config, config.PagesTarget)}
+	var logs bytes.Buffer
+	controller, err := NewController(context.Background(), config, client, state, log.New(&logs, "", 0), NewMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	for attempt := 0; attempt < 3; attempt++ {
+		controller.observe(context.Background(), start.Add(time.Duration(attempt)*probeInterval), errors.New("probe failed"))
+	}
+	if client.record.Content != config.TunnelTarget || !controller.SafetyLocked() {
+		t.Fatalf("verified-state save failure did not keep writes locked: record=%q locked=%t", client.record.Content, controller.SafetyLocked())
+	}
+	if state.state.Pending == nil || state.state.Pending.PatchVerified {
+		t.Fatalf("failed verified-state save unexpectedly updated the journal: %#v", state.state)
+	}
+
+	controller.retryRecordValidation(context.Background())
+	if controller.SafetyLocked() || state.state.Pending != nil || state.state.Target != config.TunnelTarget || len(state.state.Changes) != 1 {
+		t.Fatalf("validation did not retry the verified-state save: locked=%t state=%#v logs=%s", controller.SafetyLocked(), state.state, logs.String())
+	}
+}
+
 func TestDNSWriteRequiresPendingStateToBeSaved(t *testing.T) {
 	config := testConfig()
 	config.WritesEnabled = true
@@ -557,6 +624,38 @@ func TestUnsubmittedPendingIntentCannotUnlockAfterCancelSaveFailure(t *testing.T
 	}
 }
 
+func TestRestartWithUnverifiedPendingIntentLocksAtOriginalTarget(t *testing.T) {
+	config := testConfig()
+	config.WritesEnabled = true
+	state := &memoryStateStore{
+		state: PersistentState{
+			Target: config.PagesTarget,
+			Pending: &PendingTransition{
+				From: config.PagesTarget,
+				To:   config.TunnelTarget,
+				At:   time.Now(),
+			},
+		},
+	}
+	var logs bytes.Buffer
+	controller, err := NewController(
+		context.Background(), config,
+		&mutableRecordClient{record: testRecord(config, config.PagesTarget)},
+		state,
+		log.New(&logs, "", 0),
+		NewMetrics(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !controller.SafetyLocked() || state.state.Pending == nil {
+		t.Fatalf("restart unlocked an unverified pending intent at its original target: locked=%t state=%#v", controller.SafetyLocked(), state.state)
+	}
+	if !strings.Contains(logs.String(), "event=pending_state_unsubmitted") {
+		t.Fatalf("restart did not report its unverified pending intent: %s", logs.String())
+	}
+}
+
 func testRecord(config Config, target string) DNSRecord {
 	return DNSRecord{
 		ID:      config.RecordID,
@@ -610,10 +709,11 @@ type memoryStateStore struct {
 }
 
 type mutableRecordClient struct {
-	record      DNSRecord
-	getCalls    int
-	patched     []string
-	patchErrors []error
+	record           DNSRecord
+	getCalls         int
+	patched          []string
+	patchErrors      []error
+	applyPatchErrors bool
 }
 
 func (client *mutableRecordClient) GetRecord(context.Context) (DNSRecord, error) {
@@ -627,6 +727,10 @@ func (client *mutableRecordClient) PatchTarget(_ context.Context, target string)
 		err := client.patchErrors[0]
 		client.patchErrors = client.patchErrors[1:]
 		if err != nil {
+			if client.applyPatchErrors {
+				client.record.Content = target
+				client.record.Proxied = true
+			}
 			return DNSRecord{}, err
 		}
 	}

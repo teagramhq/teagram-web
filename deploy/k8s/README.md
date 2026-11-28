@@ -85,6 +85,48 @@ structured `level=alert` entries and Kubernetes Warning Events for a denied
 write or exhausted change cap; the metrics Service exposes probe status,
 current origin, change count, and the safety lock on port 9090.
 
+If startup reports `pending_state_unsubmitted`, the ConfigMap contains a
+transition intent without a persisted PATCH confirmation. After a pod restart,
+the monitor keeps writes locked even if the live target matches `from` or `to`,
+because it cannot distinguish an interrupted request from an operator edit.
+For manual recovery, first disable writes and failback, wait for that rollout,
+then scale `web-failover-monitor` to zero. Inspect both the configured Cloudflare
+record and the saved journal:
+
+```sh
+kubectl scale deployment web-failover-monitor -n web-failover --replicas=0
+kubectl get configmap web-failover-state -n web-failover -o yaml \
+  > ./web-failover-state-backup.yaml
+kubectl get configmap web-failover-state -n web-failover \
+  -o jsonpath='{.data.state\.json}'
+kubectl edit configmap web-failover-state -n web-failover
+```
+
+The YAML copy is the rollback for a bad manual edit; restore it with
+`kubectl apply -f ./web-failover-state-backup.yaml` while the monitor remains
+scaled to zero.
+
+Edit `data.state.json` only after verifying the record ID, name, type, proxy
+setting, and live target. If the record is at `pending.to` and Cloudflare's
+change history confirms that transition, set `target` to `pending.to`, add
+`pending.at` to `changes` once, preserve every other change from the last hour,
+and remove `pending`. If the record is at `pending.from` and the change history
+confirms that no transition occurred, preserve `target` and `changes` and remove
+`pending`. If the target differs, the ConfigMap data is missing, or the recent
+change history cannot be reconstructed, leave writes disabled and restore a
+verified state backup or reconstruct the complete hourly ledger before
+restarting. After editing, scale the monitor back to one replica while writes
+remain disabled:
+
+```sh
+kubectl scale deployment web-failover-monitor -n web-failover --replicas=1
+```
+
+Confirm the pod is ready and no state-loss or
+`pending_state_unsubmitted` alert appears. Then enable writes through the normal
+deployment configuration and verify `web_failover_safety_locked` is `0`; if it
+is `1`, disable writes and keep investigating.
+
 For a monitor rollback, first set `WRITES_ENABLED=false` and
 `FAILBACK_ENABLED=false`, wait for the rollout, then scale
 `web-failover-monitor` to zero in `web-failover`. The web deployment and tunnel

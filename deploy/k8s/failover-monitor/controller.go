@@ -27,8 +27,12 @@ type Controller struct {
 	failures     int
 	healthySince time.Time
 	recordSafe   bool
-	alerts       map[string]bool
-	mu           sync.Mutex
+	// pendingPatchRecovery records this process's pending intent and verified outcome.
+	// A readback can resolve ambiguous API results, while a restart stays fail-closed.
+	pendingPatchRecovery  *PendingTransition
+	pendingPatchAttempted bool
+	alerts                map[string]bool
+	mu                    sync.Mutex
 }
 
 func NewController(ctx context.Context, config Config, recordClient RecordClient, stateStore StateStore, logger *log.Logger, metrics *Metrics) (*Controller, error) {
@@ -109,6 +113,22 @@ func (controller *Controller) validateRecordState(ctx context.Context) bool {
 	}
 	now := time.Now()
 	state.Changes = recentChanges(state.Changes, now)
+	recoveredPatch := false
+	clearPendingRecovery := false
+	if state.Pending == nil && controller.pendingPatchRecovery != nil {
+		pending := controller.pendingPatchRecovery
+		switch {
+		case pending.PatchVerified && currentTarget == pending.To && state.Target == currentTarget:
+			recoveredPatch = true
+		case !pending.PatchVerified && currentTarget == pending.From && state.Target == currentTarget:
+			controller.pendingPatchRecovery = nil
+			controller.pendingPatchAttempted = false
+		default:
+			controller.recordSafe = false
+			controller.alert("pending_state_unsubmitted", "DNS transition state does not match the attempted PATCH; record writes are disabled")
+			return false
+		}
+	}
 	if state.Pending != nil {
 		from, fromErr := normalizeTarget(state.Pending.From)
 		to, toErr := normalizeTarget(state.Pending.To)
@@ -124,17 +144,53 @@ func (controller *Controller) validateRecordState(ctx context.Context) bool {
 			controller.alert("record_drift", "Cloudflare record changed outside the monitor; record writes are disabled")
 			return false
 		}
-		if state.Pending.PatchVerified {
+		matchesPatchRecovery := samePendingTransition(controller.pendingPatchRecovery, state.Pending)
+		patchVerifiedInMemory := matchesPatchRecovery && controller.pendingPatchRecovery.PatchVerified
+		if state.Pending.PatchVerified || patchVerifiedInMemory {
 			if currentTarget != to {
 				controller.recordSafe = false
 				controller.alert("record_drift", "Cloudflare record changed outside the monitor; record writes are disabled")
 				return false
 			}
+			if matchesPatchRecovery {
+				recoveredPatch = true
+			}
+			if !state.Pending.PatchVerified {
+				verifiedPending := *state.Pending
+				verifiedPending.PatchVerified = true
+				state.Pending = &verifiedPending
+				controller.pendingPatchRecovery = &verifiedPending
+				if err := controller.stateStore.Save(ctx, state); err != nil {
+					controller.recordSafe = false
+					controller.alert("state_pending_verify_failed", messageWithSafeCause("DNS changed but its verified transition could not be persisted; future writes are disabled", err))
+					return false
+				}
+			}
 			state.Target = to
 			state.Changes = append(state.Changes, state.Pending.At)
 		} else if currentTarget == to {
+			if !matchesPatchRecovery || !controller.pendingPatchAttempted {
+				controller.recordSafe = false
+				controller.alert("pending_state_unsubmitted", "DNS target matches a transition without a verified PATCH; record writes are disabled")
+				return false
+			}
+			verifiedPending := *state.Pending
+			verifiedPending.PatchVerified = true
+			state.Pending = &verifiedPending
+			controller.pendingPatchRecovery = &verifiedPending
+			recoveredPatch = true
+			if err := controller.stateStore.Save(ctx, state); err != nil {
+				controller.recordSafe = false
+				controller.alert("state_pending_verify_failed", messageWithSafeCause("DNS changed but its verified transition could not be persisted; future writes are disabled", err))
+				return false
+			}
+			state.Target = to
+			state.Changes = append(state.Changes, state.Pending.At)
+		} else if matchesPatchRecovery {
+			clearPendingRecovery = true
+		} else {
 			controller.recordSafe = false
-			controller.alert("pending_state_unsubmitted", "DNS target matches a transition without a verified PATCH; record writes are disabled")
+			controller.alert("pending_state_unsubmitted", "pending DNS transition has no process-local PATCH evidence; record writes are disabled")
 			return false
 		}
 		state.Pending = nil
@@ -142,6 +198,10 @@ func (controller *Controller) validateRecordState(ctx context.Context) bool {
 			controller.recordSafe = false
 			controller.alert("state_reconcile_failed", messageWithSafeCause("pending DNS transition could not be reconciled; record writes are disabled", err))
 			return false
+		}
+		if clearPendingRecovery {
+			controller.pendingPatchRecovery = nil
+			controller.pendingPatchAttempted = false
 		}
 		controller.logger.Printf("level=info event=pending_dns_transition_reconciled target=%s", currentTarget)
 	}
@@ -170,6 +230,13 @@ func (controller *Controller) validateRecordState(ctx context.Context) bool {
 	controller.history = state.Changes
 	controller.recordSafe = true
 	controller.updateMetrics(time.Now())
+	if recoveredPatch {
+		if controller.clearAlert("record_patch_failed") {
+			controller.logger.Printf("level=info event=record_patch_recovered")
+		}
+		controller.pendingPatchRecovery = nil
+		controller.pendingPatchAttempted = false
+	}
 	if controller.clearValidationAlerts() {
 		controller.logger.Printf("level=info event=record_validation_recovered")
 	}
@@ -319,6 +386,9 @@ func (controller *Controller) switchTo(ctx context.Context, target, reason strin
 		controller.alert("state_pending_failed", messageWithSafeCause("DNS update was not attempted because its pending transition could not be saved", err))
 		return
 	}
+	attemptedPending := *pendingState.Pending
+	controller.pendingPatchRecovery = &attemptedPending
+	controller.pendingPatchAttempted = false
 	intentCheckRecord, err := controller.recordClient.GetRecord(ctx)
 	if err != nil {
 		controller.cancelPendingTransition(
@@ -346,6 +416,7 @@ func (controller *Controller) switchTo(ctx context.Context, target, reason strin
 		return
 	}
 
+	controller.pendingPatchAttempted = true
 	updatedRecord, err := controller.recordClient.PatchTarget(ctx, target)
 	if err != nil {
 		controller.recordSafe = false
@@ -360,6 +431,7 @@ func (controller *Controller) switchTo(ctx context.Context, target, reason strin
 	}
 	verifiedPending := *pendingState.Pending
 	verifiedPending.PatchVerified = true
+	controller.pendingPatchRecovery = &verifiedPending
 	verifiedState := pendingState
 	verifiedState.Pending = &verifiedPending
 	if err := controller.stateStore.Save(ctx, verifiedState); err != nil {
@@ -383,6 +455,8 @@ func (controller *Controller) switchTo(ctx context.Context, target, reason strin
 	}
 	controller.target = target
 	controller.history = newState.Changes
+	controller.pendingPatchRecovery = nil
+	controller.pendingPatchAttempted = false
 	controller.metrics.recordSwitch(targetLabel(target, controller.config), false)
 	controller.updateMetrics(now)
 	controller.logger.Printf("level=info event=dns_record_switched target=%s reason=%s", target, reason)
@@ -396,6 +470,9 @@ func (controller *Controller) cancelPendingTransition(ctx context.Context, key, 
 	state := PersistentState{Target: controller.target, Changes: controller.history}
 	if err := controller.stateStore.Save(ctx, state); err != nil {
 		controller.alert("state_pending_cancel_failed", messageWithSafeCause("unsubmitted DNS transition could not be canceled; record writes are disabled", err))
+	} else {
+		controller.pendingPatchRecovery = nil
+		controller.pendingPatchAttempted = false
 	}
 	controller.alert(key, message)
 }
@@ -429,6 +506,10 @@ func recentChanges(changes []time.Time, now time.Time) []time.Time {
 		}
 	}
 	return recent
+}
+
+func samePendingTransition(first, second *PendingTransition) bool {
+	return first != nil && second != nil && first.From == second.From && first.To == second.To && first.At.Equal(second.At)
 }
 
 func normalizedPagesTarget(config Config) string {
