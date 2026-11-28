@@ -13,6 +13,7 @@ import {createPhaseTracker, type PhaseDiagnostic} from './customServerPhaseTrack
 const SERVER_HOST = 'second-server.example.test';
 const CANCEL_SERVER_HOST = 'cancel-server.example.test';
 const APP_HOST = 'web.teagram.io';
+const DEFAULT_DISCOVERY_HOST = 'server.teagram.io';
 const SERVER_WSS_ENDPOINT = `wss://${SERVER_HOST}/apiws`;
 const SERVER_USER = process.env.TEAGRAM_CUSTOM_SERVER_TEST_USER || 'custom_server_user';
 const SERVER_PASSWORD = process.env.TEAGRAM_CUSTOM_SERVER_TEST_PASSWORD || 'Teagram-Test-Password-123!';
@@ -1318,6 +1319,8 @@ test('isolates two server tabs when a custom server worker takes control', async
   let temporaryDirectory: string | undefined;
   const streamingDocId = '987654321';
   const connections: string[] = [];
+  const webSocketRequests: string[] = [];
+  const discoveryRequests: string[] = [];
   const discoveryErrors: string[] = [];
   const customPageNavigations: string[] = [];
   let customPage: Page | undefined;
@@ -1376,9 +1379,9 @@ test('isolates two server tabs when a custom server worker takes control', async
       localAppPort = appBaseUrl.port;
       appOriginString = appOrigin.origin;
       temporaryDirectory = mkdtempSync(join(tmpdir(), 'teagram-custom-server-ws-'));
-      const credentials = createTlsFixtureCredentials(temporaryDirectory, [SERVER_HOST, APP_HOST]);
+      const credentials = createTlsFixtureCredentials(temporaryDirectory, [SERVER_HOST, APP_HOST, DEFAULT_DISCOVERY_HOST]);
 
-      // Both hosts resolve to this listener (see playwright.private-auth.config.ts) because
+      // All three hosts resolve to this listener (see playwright.private-auth.config.ts) because
       // Playwright routing does not cover module imports inside the MTProto SharedWorker.
       webSocketServer = new WebSocketServer({noServer: true});
       tlsServer = createServer({
@@ -1390,7 +1393,13 @@ test('isolates two server tabs when a custom server worker takes control', async
         if(host === APP_HOST && url.pathname === '/stream/__server-isolation-probe') {
           response.writeHead(200, {'content-type': 'text/plain'});
           response.end('network-default');
-        } else if((host === APP_HOST || host === SERVER_HOST) && url.pathname === '/.well-known/teagramd/client') {
+        } else if(url.pathname === '/.well-known/teagramd/client') {
+          discoveryRequests.push(`https://${host}${url.pathname}`);
+          if(host !== DEFAULT_DISCOVERY_HOST && host !== SERVER_HOST) {
+            response.writeHead(404);
+            response.end();
+            return;
+          }
           void fetch(`${serverHttpUrl}/.well-known/teagramd/client`).then(async(upstreamResponse) => {
             const body = await upstreamResponse.text();
             if(!upstreamResponse.ok) throw new Error(`local server discovery returned ${upstreamResponse.status}`);
@@ -1434,6 +1443,8 @@ test('isolates two server tabs when a custom server worker takes control', async
       tlsSocketTracker = trackTlsServerSockets(tlsServer);
       tlsServer.on('upgrade', (request, socket, head) => {
         tlsSocketTracker!.markUpgrade(socket);
+        const host = (request.headers.host || '').replace(/:\d+$/, '');
+        webSocketRequests.push(`wss://${host}${request.url}`);
         if(request.url !== '/apiws') {
           socket.destroy();
           return;
@@ -1490,10 +1501,11 @@ test('isolates two server tabs when a custom server worker takes control', async
 
       await page.context().route('**/*', (route) => {
         const {hostname} = new URL(route.request().url());
-        return hostname === APP_HOST || hostname === SERVER_HOST ? route.continue() : route.abort();
+        return hostname === APP_HOST || hostname === SERVER_HOST || hostname === DEFAULT_DISCOVERY_HOST ? route.continue() : route.abort();
       });
 
       await page.goto(appOriginString, {waitUntil: 'domcontentloaded'});
+      expect(new URL(page.url()).origin).toBe(appOriginString);
       expect(await page.evaluate(() => isSecureContext && !!crypto.subtle)).toBe(true);
 
       await expect(page.locator('#auth-pages')).toBeVisible({timeout: 30_000});
@@ -1513,6 +1525,69 @@ test('isolates two server tabs when a custom server worker takes control', async
         const saved = await (window as any).rootScope.managers.appDocsManager.saveDoc(doc);
         return saved.supportsStreaming;
       }, streamingDocument(streamingDocId))).toBe(true);
+    });
+
+    await runPhase('default username/password sign-in and chat open', async() => {
+      const auth = page.locator('#auth-pages');
+      await expect(auth.getByRole('textbox', {name: 'Username'})).toBeVisible({timeout: 30_000});
+      const warmup = await page.evaluate(async(username) => {
+        const moduleUrl = new URL('/src/pages/privateUsernameAuth.ts', window.location.origin).href;
+        const {authenticatePrivateUsername} = await import(moduleUrl);
+        const apiManager = (window as any).rootScope.managers.apiManager;
+        return authenticatePrivateUsername(username, (method: any, params: any, options?: any) => {
+          return options ? apiManager.invokeApi(method, params, options) : apiManager.invokeApi(method, params);
+        });
+      }, SERVER_USER);
+      expect(warmup).toMatchObject({kind: 'password'});
+      expect(deleteUnboundCustomServerAuthKeys()).toBeGreaterThan(0);
+
+      await auth.getByRole('textbox', {name: 'Username'}).fill(SERVER_USER);
+      await auth.getByRole('button', {name: 'Next'}).click();
+      const password = auth.locator('input[name="notsearch_password"]');
+      await expect(password).toBeVisible({timeout: 30_000});
+      await password.fill(SERVER_PASSWORD);
+      await auth.getByRole('button', {name: 'Next'}).click();
+      await expect(page.locator('#page-chats')).toBeVisible({timeout: 60_000});
+
+      const openedChat = await page.evaluate(async() => {
+        const appImManager = (window as any).rootScope.managers.appImManager;
+        await appImManager.setPeer({peerId: appImManager.myId});
+        return {
+          peerId: String(appImManager.chat?.peerId),
+          myId: String(appImManager.myId)
+        };
+      });
+      expect(openedChat.peerId).toBe(openedChat.myId);
+      await expect(page.locator('.chat').first()).toBeVisible();
+
+      expect(discoveryRequests).toEqual([`https://${DEFAULT_DISCOVERY_HOST}/.well-known/teagramd/client`]);
+      expect(webSocketRequests).toContain(SERVER_WSS_ENDPOINT);
+      expect(webSocketRequests).not.toContain(`wss://${APP_HOST}/apiws`);
+      expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_ID__)).toBe('default');
+      const getSavedState = () => page.evaluate((host) => ({
+        choice: localStorage.getItem('teagram.server-choice.v1'),
+        activeId: localStorage.getItem('teagram.active-server-id.v1'),
+        target: JSON.parse(localStorage.getItem('teagram.server-target.v1') || 'null'),
+        pin: JSON.parse(localStorage.getItem('teagram.server-pins.v1') || '{}')[host]
+      }), APP_HOST);
+      const savedState = await getSavedState();
+      expect(savedState).toMatchObject({
+        choice: APP_HOST,
+        activeId: 'default',
+        target: {host: APP_HOST},
+        pin: {host: APP_HOST, endpoint: SERVER_WSS_ENDPOINT}
+      });
+
+      await page.reload({waitUntil: 'domcontentloaded'});
+      await expect(page.locator('#page-chats')).toBeVisible({timeout: 60_000});
+      await expect(page.getByRole('dialog')).toHaveCount(0);
+      expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_ID__)).toBe('default');
+      expect(await getSavedState()).toEqual(savedState);
+      expect(discoveryRequests).toEqual([
+        `https://${DEFAULT_DISCOVERY_HOST}/.well-known/teagramd/client`,
+        `https://${DEFAULT_DISCOVERY_HOST}/.well-known/teagramd/client`
+      ]);
+      expect(webSocketRequests).not.toContain(`wss://${APP_HOST}/apiws`);
     });
 
     await runPhase('worker takeover', async() => {
@@ -1762,6 +1837,7 @@ test('isolates two server tabs when a custom server worker takes control', async
   expect(completedPhases).toEqual([
     'setup',
     'streaming: default tab',
+    'default username/password sign-in and chat open',
     'worker takeover',
     'identity handshake',
     'streaming isolation',
