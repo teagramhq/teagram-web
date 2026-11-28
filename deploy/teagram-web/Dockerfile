@@ -1,3 +1,13 @@
+FROM golang:1.27.2-alpine AS failover-monitor-build
+
+WORKDIR /monitor
+
+COPY deploy/k8s/failover-monitor/ ./
+
+RUN mkdir -p /out \
+  && GO111MODULE=off CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath -ldflags='-s -w' -o /out/web-failover-monitor .
+
 FROM node:24.18.0-alpine AS artifact-verification
 
 WORKDIR /workspace
@@ -15,7 +25,7 @@ RUN node scripts/verify-deployment-artifact.mjs --dist dist-private --commit "$P
 FROM nginx:stable-alpine3.20
 
 # Only the audited static artifact crosses from the Node verification stage.
-# The final serving image remains an Nginx-only runtime.
+# Nginx remains the web runtime; the failover binary is idle unless a pod overrides the command.
 RUN rm -rf /usr/share/nginx/html \
   && mkdir -p /usr/share/nginx/html \
   && rm -f /etc/nginx/conf.d/default.conf \
@@ -25,5 +35,6 @@ RUN rm -rf /usr/share/nginx/html \
 COPY deploy/teagram-web/nginx.conf /etc/nginx/nginx.conf
 COPY deploy/teagram-web/security-headers.conf /etc/nginx/security-headers.conf
 COPY --from=artifact-verification /workspace/dist-private/ /usr/share/nginx/html/
+COPY --from=failover-monitor-build /out/web-failover-monitor /usr/local/bin/web-failover-monitor
 
 EXPOSE 8080

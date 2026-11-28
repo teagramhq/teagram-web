@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: web-failover
+  labels:
+    app.kubernetes.io/name: web-failover
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: web-failover-monitor
+  namespace: web-failover
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: web-failover-monitor
+  namespace: web-failover
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["web-failover-token"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["web-failover-state", "web-failover-state-initialized"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["web-failover-state"]
+    verbs: ["patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: web-failover-monitor
+  namespace: web-failover
+subjects:
+  - kind: ServiceAccount
+    name: web-failover-monitor
+    namespace: web-failover
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: web-failover-monitor

@@ -12,7 +12,7 @@ IMAGE_PATTERN = re.compile(r"ghcr\.io/teagramhq/teagram-web@sha256:([0-9a-f]{64}
 ARTIFACT_DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 SOURCE_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 PLACEHOLDER_PATTERN = re.compile(
-    r"(?m)^([ \t]*-[ \t]+image:\s*)ghcr\.io/teagramhq/teagram-web@sha256:0{64}\s*$"
+    r"(?m)^([ \t]*(?:-[ \t]+)?image:\s*)ghcr\.io/teagramhq/teagram-web@sha256:0{64}\s*$"
 )
 
 
@@ -22,10 +22,11 @@ def fail(message):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Render the production web overlay with its reviewed image pin."
+        description="Render a production Kubernetes overlay with its reviewed image pin."
     )
     parser.add_argument("--pin", required=True, type=Path)
     parser.add_argument("--source-commit", required=True)
+    parser.add_argument("--overlay", choices=("prod", "failover"), default="prod")
     args = parser.parse_args()
 
     if not SOURCE_COMMIT_PATTERN.fullmatch(args.source_commit):
@@ -50,7 +51,7 @@ def main():
         fail("image pin must be a non-placeholder teagram-web registry digest")
 
     repository_root = Path(__file__).resolve().parents[2]
-    overlay = repository_root / "deploy/k8s/overlays/prod"
+    overlay = repository_root / "deploy/k8s/overlays" / args.overlay
     rendered = subprocess.run(
         ["kubectl", "kustomize", str(overlay)],
         check=False,
@@ -65,7 +66,7 @@ def main():
         lambda match: f"{match.group(1)}{pin['image']}", rendered.stdout
     )
     if replacements != 1:
-        fail(f"expected one production image placeholder, found {replacements}")
+        fail(f"expected one image placeholder, found {replacements}")
 
     sys.stdout.write(manifest)
 
